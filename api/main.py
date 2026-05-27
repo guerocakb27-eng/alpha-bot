@@ -11,8 +11,12 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from api.routes import indicators, performance, settings as settings_route, signals, status as status_route, trades, webhook
-from api.websocket import ws_endpoint
+from api.websocket import manager as ws_manager, ws_endpoint
 from config import settings
+from core.bot_loop import BotLoop
+from core.execution_engine import ExecutionEngine
+from core.learning_engine import LearningEngine
+from core.risk_manager import RiskManager
 from core.signal_engine import SignalEngine
 from database.models import init_db
 from database.seed import seed
@@ -39,11 +43,22 @@ async def lifespan(app: FastAPI):
         exchange.set_sandbox_mode(True)
     app.state.exchange = exchange
     app.state.signal_engine = SignalEngine(exchange)
-    logger.info("SignalEngine ready.")
+    app.state.risk_manager = RiskManager()
+    app.state.execution_engine = ExecutionEngine(exchange, risk=app.state.risk_manager)
+    app.state.learning_engine = LearningEngine()
+    app.state.bot_loop = BotLoop(
+        signal_engine=app.state.signal_engine,
+        execution_engine=app.state.execution_engine,
+        learning_engine=app.state.learning_engine,
+        ws_manager=ws_manager,
+    )
+    app.state.bot_loop.start()
+    logger.info("SignalEngine + ExecutionEngine + BotLoop ready (idle until /api/bot/start).")
 
     yield
 
     logger.info("Alpha Bot API shutting down.")
+    await app.state.bot_loop.stop()
 
 
 app = FastAPI(

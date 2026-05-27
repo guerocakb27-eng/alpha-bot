@@ -8,7 +8,7 @@ from database.models import BotSettings, IndicatorWeights, OptimizationMethod, S
 
 
 DEFAULT_SETTINGS: dict[str, object] = {
-    "min_signal_score": 65,
+    "min_signal_score": 10,
     "min_confidence": 60,
     "risk_per_trade_pct": 1.0,
     "max_open_positions": 3,

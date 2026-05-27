@@ -1,0 +1,199 @@
+//@version=5
+// Alpha Bot — Strategy mirror of the Python signal engine.
+// Computes a regime-aware -100..+100 score from EMA/RSI/MACD/BB/ATR/RVOL/ADX
+// and emits a JSON alert that the FastAPI webhook receives + validates via HMAC.
+strategy("Alpha Bot",
+     overlay=true,
+     pyramiding=0,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// ─── Inputs ─────────────────────────────────────────────────────────
+g_alert    = "Alerts"
+g_visual   = "Visuals"
+g_strategy = "Strategy"
+
+minAlertScore  = input.int(65, "Min |score| to alert", minval=10, maxval=95, group=g_alert)
+webhookSecret  = input.string("change_me", "Webhook secret (HMAC)", group=g_alert, tooltip="Must match WEBHOOK_SECRET in your .env")
+showPanel      = input.bool(true,  "Show score panel", group=g_visual)
+showShapes     = input.bool(true,  "Show entry/exit shapes", group=g_visual)
+showTint       = input.bool(true,  "Tint background by signal", group=g_visual)
+takeTrades     = input.bool(false, "Place strategy trades (paper)", group=g_strategy)
+slAtrMult      = input.float(1.5, "SL ATR multiplier", minval=0.5, maxval=4.0, step=0.1, group=g_strategy)
+rrRatio        = input.float(2.0, "RR ratio", minval=1.0, maxval=5.0, step=0.1, group=g_strategy)
+
+// ─── Indicators ─────────────────────────────────────────────────────
+ema21  = ta.ema(close, 21)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+rsi14  = ta.rsi(close, 14)
+
+[macdLine, signalLine, histLine] = ta.macd(close, 12, 26, 9)
+
+bbBasis = ta.sma(close, 20)
+bbDev   = 2.0 * ta.stdev(close, 20)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbWidth = (bbUpper - bbLower) / bbBasis
+bbPctB  = (close - bbLower) / (bbUpper - bbLower)
+
+atr14  = ta.atr(14)
+atrAvg = ta.sma(atr14, 50)
+
+volAvg = ta.sma(volume, 20)
+rvolV  = volume / volAvg
+
+[diPlus, diMinus, adxV] = ta.dmi(14, 14)
+
+// ─── Scoring helpers (mirror Python core/_scoring.py) ──────────────
+score_rsi(v) =>
+    v < 20 ? 90 : v < 30 ? 60 : v < 45 ? 20 : v < 55 ? 0 : v < 70 ? -20 : v < 80 ? -60 : -90
+
+score_ema_stack(c, e50, e200) =>
+    c > e50 and e50 > e200 ? 70 : c > e200 and e200 > e50 ? 30 : c > e200 ? 30 : c < e50 and e50 < e200 ? -70 : c < e200 and e200 < e50 ? -30 : c < e200 ? -30 : 0
+
+score_macd(h, hp) =>
+    growing = math.abs(h) > math.abs(hp)
+    h > 0 and growing ? 70 : h > 0 ? 30 : h < 0 and growing ? -70 : h < 0 ? -30 : 0
+
+score_bb_pb(pb) =>
+    pb < 0.0 ? 60 : pb < 0.2 ? 30 : pb < 0.8 ? 0 : pb < 1.0 ? -30 : -60
+
+score_rvol(rv, dir) =>
+    rv < 0.5 ? 0 : rv > 2.0 ? 50 * dir : rv > 1.5 ? 35 * dir : rv > 1.0 ? 15 * dir : 0
+
+score_adx(p, m, a) =>
+    a < 20 ? 0 : (p > m ? math.min((a - 20) / 30, 1.0) * 50 : -math.min((a - 20) / 30, 1.0) * 50)
+
+// ─── Compute scores ────────────────────────────────────────────────
+candleDir = close > open ? 1 : close < open ? -1 : 0
+
+sRsi   = score_rsi(rsi14)
+sEma   = score_ema_stack(close, ema50, ema200)
+sMacd  = score_macd(histLine, histLine[1])
+sBb    = score_bb_pb(bbPctB)
+sRvol  = score_rvol(rvolV, candleDir)
+sAdx   = score_adx(diPlus, diMinus, adxV)
+
+// Layer aggregation (single indicator per layer in the condensed Pine version)
+trendL = math.round((sEma * 0.6) + (sAdx * 0.4))
+momL   = math.round((sRsi * 0.5) + (sMacd * 0.5))
+volaL  = sBb
+volL   = sRvol
+patL   = 0   // patterns not detected in Pine condensed version
+sentL  = 0   // sentiment not available in Pine
+
+// ─── Regime detection (mirror MarketRegimeDetector) ────────────────
+inSqueeze = bbUpper < ta.sma(close, 20) + 1.5 * atr14 and bbLower > ta.sma(close, 20) - 1.5 * atr14
+squeezeRun = inSqueeze and inSqueeze[1] and inSqueeze[2] and inSqueeze[3] and inSqueeze[4]
+highVol  = (atr14 / atrAvg) > 1.5 and rvolV > 1.5
+
+regimeStr =
+   squeezeRun                                ? "SQUEEZE"
+   : highVol                                 ? "HIGH_VOLATILITY"
+   : (adxV > 25 and diPlus > diMinus and close > ema200) ? "TRENDING_BULL"
+   : (adxV > 25 and diMinus > diPlus and close < ema200) ? "TRENDING_BEAR"
+   : adxV < 20                               ? "RANGING"
+   : close > ema200                          ? "TRENDING_BULL"
+   :                                           "TRENDING_BEAR"
+
+// Layer weights per regime
+[wT, wM, wVla, wVol, wP, wS] =
+   regimeStr == "TRENDING_BULL"   ? [0.35, 0.25, 0.10, 0.15, 0.05, 0.10]
+ : regimeStr == "TRENDING_BEAR"   ? [0.35, 0.25, 0.10, 0.15, 0.05, 0.10]
+ : regimeStr == "RANGING"         ? [0.10, 0.30, 0.25, 0.15, 0.10, 0.10]
+ : regimeStr == "HIGH_VOLATILITY" ? [0.15, 0.20, 0.30, 0.20, 0.05, 0.10]
+ :                                  [0.20, 0.15, 0.30, 0.25, 0.05, 0.05] // SQUEEZE
+
+// Renormalize because pattern/sentiment layers are 0 in Pine — keeps score comparable.
+activeW = wT + wM + wVla + wVol
+finalScore = activeW > 0 ? math.round((trendL * wT + momL * wM + volaL * wVla + volL * wVol) / activeW) : 0
+finalScore := math.max(-100, math.min(100, finalScore))
+
+// Confidence (% of layers agreeing with final sign)
+finalSign = finalScore > 0 ? 1 : finalScore < 0 ? -1 : 0
+agreeing  = (trendL * finalSign > 0 ? 1 : 0) + (momL * finalSign > 0 ? 1 : 0) + (volaL * finalSign > 0 ? 1 : 0) + (volL * finalSign > 0 ? 1 : 0)
+nonZero   = (trendL != 0 ? 1 : 0) + (momL != 0 ? 1 : 0) + (volaL != 0 ? 1 : 0) + (volL != 0 ? 1 : 0)
+confidence = nonZero == 0 ? 0 : math.round(100 * agreeing / nonZero)
+
+signalStr = finalScore >=  minAlertScore ? "BUY"
+          : finalScore <= -minAlertScore ? "SELL"
+          :                                 "NEUTRAL"
+
+// ─── Visuals: panel ────────────────────────────────────────────────
+var table panel = table.new(position.bottom_right, 2, 8, border_width=1)
+
+barColor(s) =>
+    s >=  40 ? color.new(color.lime, 0)
+  : s >=  10 ? color.new(color.aqua, 0)
+  : s >  -10 ? color.new(color.yellow, 0)
+  : s >  -40 ? color.new(color.orange, 0)
+  :            color.new(color.red, 0)
+
+bar10(v) =>
+    n = math.round(math.min(math.abs(v) / 10, 10))
+    str.repeat("█", n) + str.repeat("░", 10 - n)
+
+if showPanel and barstate.islast
+    table.cell(panel, 0, 0, "ALPHA BOT", bgcolor=color.new(color.black, 20), text_color=color.white,  text_size=size.normal)
+    table.cell(panel, 1, 0, (finalScore > 0 ? "+" : "") + str.tostring(finalScore) + " " + signalStr,
+               bgcolor=color.new(color.black, 20),
+               text_color=signalStr == "BUY" ? color.lime : signalStr == "SELL" ? color.red : color.yellow,
+               text_size=size.normal)
+    table.cell(panel, 0, 1, regimeStr, bgcolor=color.new(color.black, 50), text_color=color.aqua, text_size=size.small)
+    table.cell(panel, 1, 1, "Conf " + str.tostring(confidence) + "%", bgcolor=color.new(color.black, 50), text_color=color.silver, text_size=size.small)
+
+    layerNames = array.from("Trend", "Momentum", "Volatility", "Volume", "Pattern", "Sentiment")
+    layerVals  = array.from(trendL, momL, volaL, volL, patL, sentL)
+    for i = 0 to 5
+        table.cell(panel, 0, 2 + i, array.get(layerNames, i), bgcolor=color.new(color.black, 70), text_color=color.silver, text_size=size.small)
+        v = array.get(layerVals, i)
+        table.cell(panel, 1, 2 + i, bar10(v) + " " + (v > 0 ? "+" : "") + str.tostring(v),
+                   bgcolor=color.new(color.black, 70),
+                   text_color=barColor(v),
+                   text_size=size.small)
+
+// ─── Visuals: shapes + tint ────────────────────────────────────────
+plotshape(showShapes and signalStr == "BUY"  and signalStr[1] != "BUY",
+          title="BUY", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, text="BUY")
+plotshape(showShapes and signalStr == "SELL" and signalStr[1] != "SELL",
+          title="SELL", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, text="SELL")
+
+bgcolor(showTint and signalStr == "BUY"  ? color.new(color.lime, 92) : signalStr == "SELL" ? color.new(color.red, 92) : na)
+
+// ─── Strategy entries (optional — kept off by default) ─────────────
+slLong  = close - slAtrMult * atr14
+tpLong  = close + slAtrMult * atr14 * rrRatio
+slShort = close + slAtrMult * atr14
+tpShort = close - slAtrMult * atr14 * rrRatio
+
+if takeTrades and signalStr == "BUY"  and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-exit", from_entry="L", stop=slLong, limit=tpLong)
+if takeTrades and signalStr == "SELL" and strategy.position_size == 0
+    strategy.entry("S", strategy.short)
+    strategy.exit("S-exit", from_entry="S", stop=slShort, limit=tpShort)
+
+// ─── Alerts ────────────────────────────────────────────────────────
+alertPayload = '{"symbol":"' + syminfo.tickerid +
+   '","timeframe":"' + timeframe.period +
+   '","signal":"' + signalStr +
+   '","score":' + str.tostring(finalScore) +
+   ',"confidence":' + str.tostring(confidence) +
+   ',"regime":"' + regimeStr +
+   '","timestamp":"' + str.tostring(time) +
+   '","close":' + str.tostring(close) +
+   ',"atr":' + str.tostring(atr14) +
+   ',"sl_suggested":' + str.tostring(signalStr == "BUY" ? slLong : slShort) +
+   ',"tp_suggested":' + str.tostring(signalStr == "BUY" ? tpLong : tpShort) +
+   ',"secret":"' + webhookSecret + '"}'
+
+alertcondition(signalStr == "BUY"  and finalScore >=  minAlertScore and signalStr[1] != "BUY",
+               title="Alpha Bot BUY",  message=alertPayload)
+alertcondition(signalStr == "SELL" and finalScore <= -minAlertScore and signalStr[1] != "SELL",
+               title="Alpha Bot SELL", message=alertPayload)

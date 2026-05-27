@@ -1,0 +1,127 @@
+"""Central configuration for Alpha Bot.
+
+Loads .env via pydantic-settings, defines regime weights, indicator weights,
+and signal thresholds. All modules import constants from here.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from loguru import logger
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    paper_trading: bool = True
+    binance_testnet: bool = True
+    binance_api_key: str = ""
+    binance_secret: str = ""
+
+    database_url: str = "sqlite:///./trading_bot.db"
+    redis_url: str = "redis://localhost:6379/0"
+    webhook_secret: str = "change_me"
+
+    twitter_bearer_token: str = ""
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+    reddit_user_agent: str = "trading_bot_v1"
+
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    discord_webhook_url: str = ""
+
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+    dashboard_port: int = 8080
+
+    log_level: str = "INFO"
+
+
+settings = Settings()
+
+
+# ─── Signal Engine Thresholds ─────────────────────────────────────────
+MIN_SIGNAL_SCORE: int = 65
+MIN_CONFIDENCE: int = 60
+
+
+# ─── Regime → Layer Weights (sum to 1.0 per regime) ───────────────────
+WEIGHTS_BY_REGIME: dict[str, dict[str, float]] = {
+    "TRENDING_BULL":   {"trend": 0.35, "momentum": 0.25, "volume": 0.15, "volatility": 0.10, "pattern": 0.05, "sentiment": 0.10},
+    "TRENDING_BEAR":   {"trend": 0.35, "momentum": 0.25, "volume": 0.15, "volatility": 0.10, "pattern": 0.05, "sentiment": 0.10},
+    "RANGING":         {"trend": 0.10, "momentum": 0.30, "volume": 0.15, "volatility": 0.25, "pattern": 0.10, "sentiment": 0.10},
+    "HIGH_VOLATILITY": {"trend": 0.15, "momentum": 0.20, "volume": 0.20, "volatility": 0.30, "pattern": 0.05, "sentiment": 0.10},
+    "SQUEEZE":         {"trend": 0.20, "momentum": 0.15, "volume": 0.25, "volatility": 0.30, "pattern": 0.05, "sentiment": 0.05},
+}
+
+
+# ─── Within-Layer Indicator Weights (sum to 1.0 per layer) ────────────
+INDICATOR_WEIGHTS_WITHIN_LAYER: dict[str, dict[str, float]] = {
+    "trend": {
+        "ema_stack":   0.25,
+        "ema_cross":   0.15,
+        "supertrend":  0.15,
+        "ichimoku":    0.10,
+        "adx_dir":     0.15,
+        "psar":        0.10,
+        "vwap":        0.10,
+    },
+    "momentum": {
+        "rsi_14":      0.20,
+        "stoch_rsi":   0.15,
+        "macd":        0.20,
+        "cci":         0.10,
+        "williams_r":  0.10,
+        "roc":         0.10,
+        "tsi":         0.10,
+        "ult_osc":     0.05,
+    },
+    "volatility": {
+        "bb_percent_b": 0.30,
+        "bb_width":     0.15,
+        "keltner":      0.15,
+        "atr_regime":   0.15,
+        "bb_squeeze":   0.10,
+        "donchian":     0.15,
+    },
+    "volume": {
+        "rvol":          0.20,
+        "obv_trend":     0.20,
+        "cmf":           0.15,
+        "mfi":           0.15,
+        "ad_trend":      0.10,
+        "force_index":   0.10,
+        "vwma_cross":    0.10,
+    },
+    "pattern": {
+        "candles":       0.50,
+        "support_resist": 0.30,
+        "chart_patterns": 0.20,
+    },
+    # Sentiment layer pending Phase 3
+}
+
+
+# ─── Logging Setup ────────────────────────────────────────────────────
+logger.remove()
+logger.add(
+    sys.stderr,
+    level=settings.log_level,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+)
+logger.add(
+    PROJECT_ROOT / "logs" / "bot.log",
+    level=settings.log_level,
+    rotation="50 MB",
+    retention="14 days",
+)

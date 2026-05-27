@@ -1,0 +1,23 @@
+{
+  "_comment": "Reference payload TradingView will POST to /api/webhook/tradingview. The Pine script generates this exact shape. The receiver verifies the HMAC-SHA256 of the request body against the X-Signature header (sha256=<hex>); the inline 'secret' field is convenience for human testing and is NOT what the API checks.",
+  "_setup": [
+    "1. In TradingView, create an alert on the Alpha Bot strategy.",
+    "2. Message body: leave empty — Pine emits the JSON automatically.",
+    "3. Webhook URL: https://your-domain.example.com/api/webhook/tradingview",
+    "4. The Pine script's 'webhookSecret' input must match WEBHOOK_SECRET in .env.",
+    "5. Real signature header must be sent separately: X-Signature: sha256=<HMAC-SHA256 of raw body>.",
+    "   TradingView does NOT sign requests itself, so put a reverse-proxy (Cloudflare Worker / nginx / Lambda) in front that computes the HMAC and forwards. Or run the bot behind a private endpoint and rely on the secret-in-body match plus IP allowlisting."
+  ],
+  "symbol": "BTC/USDT",
+  "timeframe": "60",
+  "signal": "BUY",
+  "score": 73,
+  "confidence": 81,
+  "regime": "TRENDING_BULL",
+  "timestamp": "1769000400000",
+  "close": 75000.50,
+  "atr": 1234.56,
+  "sl_suggested": 73148.66,
+  "tp_suggested": 78704.18,
+  "secret": "change_me_to_random_string"
+}

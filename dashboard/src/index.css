@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+body { background: radial-gradient(ellipse at top, #0d1321 0%, #080c14 60%); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #0d1321; }
+::-webkit-scrollbar-thumb { background: #1a2744; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #2a3a64; }
+
+@layer utilities {
+  .panel { @apply bg-panel border border-border rounded-lg shadow-panel; }
+  .chip  { @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold tracking-wider uppercase; }
+  .label { @apply text-[10px] tracking-[0.18em] uppercase text-text-dim font-semibold; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 230, 118, 0.6); }
+  50%      { box-shadow: 0 0 0 6px rgba(0, 230, 118, 0); }
+}
+.pulse-dot { animation: pulse-dot 2s infinite; }
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.slide-in { animation: slide-in 200ms ease-out; }

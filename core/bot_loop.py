@@ -100,7 +100,16 @@ class BotLoop:
                     await notifications.error(f"Cycle error: {e}", critical=False)
                 except Exception:
                     pass
-            await asyncio.sleep(self.cycle_seconds)
+            await self._interruptible_sleep(self.cycle_seconds)
+
+    async def _interruptible_sleep(self, total: float) -> None:
+        """Sleep in IDLE_POLL_SECONDS chunks so emergency-close + stop are reactive."""
+        elapsed = 0.0
+        while elapsed < total:
+            if bot_state.emergency_close or not bot_state.running:
+                return
+            await asyncio.sleep(min(IDLE_POLL_SECONDS, total - elapsed))
+            elapsed += IDLE_POLL_SECONDS
 
     # ─── Cycle ────────────────────────────────────────────────────────
     async def _cycle(self) -> None:
@@ -146,10 +155,15 @@ class BotLoop:
                 "confidence": row.confidence, "regime": row.regime,
             })
 
-        # 3. Open trades on high-conviction signals (one position per symbol)
+        # 3. Open trades on high-conviction signals (one position per symbol).
+        # Note: SignalEngine labels BUY/SELL/NEUTRAL using config.MIN_SIGNAL_SCORE.
+        # For trade-gating we re-derive the label from the live DB threshold so users
+        # can lower min_signal_score and immediately see trades fire.
         for symbol, result in results:
             if abs(result.final_score) < min_score:
                 continue
+            if result.signal == "NEUTRAL":
+                result.signal = "BUY" if result.final_score > 0 else "SELL"
             with SessionLocal() as db:
                 already_open = db.scalars(
                     select(Trade).where(Trade.symbol == symbol, Trade.status == TradeStatus.OPEN)

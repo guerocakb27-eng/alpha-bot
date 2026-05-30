@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config import settings
+from core.deadman import deadman_triggered
 from core.reconciliation import find_discrepancies
 from core.risk_manager import RiskManager, TradePlan
 from core.signal_engine import SignalResult
@@ -86,6 +87,7 @@ class ExecutionEngine:
         self._paper_override = paper
         self.broker = broker or VirtualBroker()
         self._validated = False
+        self.last_exchange_contact = time.time()  # dead-man's switch heartbeat
 
     @property
     def paper(self) -> bool:
@@ -123,6 +125,34 @@ class ExecutionEngine:
                           event_metadata={"discrepancies": [d.detail for d in discr]})
         return discr
 
+    def mark_contact(self) -> None:
+        """Record a successful exchange interaction (resets the dead-man's switch)."""
+        self.last_exchange_contact = time.time()
+
+    def deadman_check(self, now: float | None = None) -> str:
+        """OK | ALERT | FLATTEN by time since last exchange contact. Paper mode has no
+        live exchange to lose, so it is always OK."""
+        if self.paper:
+            return "OK"
+        now = time.time() if now is None else now
+        if not deadman_triggered(self.last_exchange_contact, now, settings.deadman_timeout_s):
+            return "OK"
+        return "FLATTEN" if settings.deadman_flatten else "ALERT"
+
+    def flatten_all(self, current_prices: dict) -> list:
+        """Close every open position (dead-man's switch / emergency). Reuses
+        check_and_close (paper -> VirtualBroker; live -> gated exchange). Live behavior
+        is validated on testnet."""
+        closed = []
+        with SessionLocal() as db:
+            for trade in list(db.scalars(select(Trade).where(Trade.status == TradeStatus.OPEN))):
+                price = current_prices.get(trade.symbol)
+                if price is None:
+                    continue
+                self.check_and_close(trade, price, db, reason="deadman_flatten")
+                closed.append(trade.id)
+        return closed
+
     # ─── Initialization ───────────────────────────────────────────────
     async def validate_permissions(self) -> None:
         """In live mode, refuse to start if API keys have withdraw permission."""
@@ -144,6 +174,7 @@ class ExecutionEngine:
             return self.broker.balance_usdt
         try:
             data = self.exchange.fetch_balance()
+            self.mark_contact()
             return float(data["total"].get("USDT", 0))
         except Exception as e:
             logger.error("fetch_balance failed: {}", e)

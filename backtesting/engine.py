@@ -94,7 +94,7 @@ class Backtester:
         from indicators import momentum, patterns, trend, volatility, volume
         from config import INDICATOR_WEIGHTS_WITHIN_LAYER, WEIGHTS_BY_REGIME
         from core.signal_engine import SignalResult
-        from datetime import timezone
+        from datetime import datetime, timezone
 
         df = window
         regime = MarketRegimeDetector().detect(df)

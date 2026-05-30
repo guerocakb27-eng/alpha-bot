@@ -63,7 +63,10 @@ def ichimoku(df: pd.DataFrame) -> dict[str, pd.Series]:
     kijun = ind.ichimoku_base_line()
     senkou_a = ind.ichimoku_a()
     senkou_b = ind.ichimoku_b()
-    chikou = df["close"].shift(-26)
+    # Chikou for SIGNALS is the current close (scoring compares it against an
+    # independently-computed price_26). The classic shift(-26) only plots it 26
+    # bars back and would leak future prices into bar t, so never use it to decide.
+    chikou = df["close"]
     return {"tenkan": tenkan, "kijun": kijun, "senkou_a": senkou_a, "senkou_b": senkou_b, "chikou": chikou}
 
 

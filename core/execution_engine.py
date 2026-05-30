@@ -138,7 +138,7 @@ class ExecutionEngine:
                           event_metadata={"symbol": signal.symbol, "signal": signal.signal})
                 return None
 
-            plan = self.risk.build_plan(signal.signal, current_price, atr, bal)
+            plan = self.risk.build_plan(signal.signal, current_price, atr, bal, size_multiplier=check.size_multiplier)
             if plan.size_usdt < 10:
                 logger.info("Position too small (${:.2f}), skipping", plan.size_usdt)
                 return None

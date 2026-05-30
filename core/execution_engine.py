@@ -129,6 +129,7 @@ class ExecutionEngine:
             return None
 
         with SessionLocal() as db:
+            self.risk.refresh(db)   # apply any BotSettings risk-param changes at runtime
             bal = self.balance()
             atr_pct = (atr / current_price) * 100
             check = self.risk.pre_trade_check(db, signal.symbol, bal, atr_pct)

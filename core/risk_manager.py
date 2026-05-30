@@ -67,11 +67,8 @@ def circuit_breaker_action(day_loss_pct: float, week_loss_pct: float) -> str:
 
 
 class RiskManager:
-    """All trade decisions go through here. Stateless except for in-memory peak tracking."""
-
-    def __init__(self) -> None:
-        # Per-trade peak unrealized PnL ratio (in R-multiples) for trailing stops.
-        self._trade_peak_r: dict[int, float] = {}
+    """All trade decisions go through here. Stateless — the trailing-stop peak lives on
+    the Trade row (peak_r), so it survives a restart."""
 
     # ─── Pre-trade checks ─────────────────────────────────────────────
     def pre_trade_check(
@@ -190,8 +187,8 @@ class RiskManager:
         profit = (current_price - trade.entry_price) if trade.side.value == "BUY" else (trade.entry_price - current_price)
         r = profit / initial_risk
 
-        peak = max(self._trade_peak_r.get(trade.id, 0), r)
-        self._trade_peak_r[trade.id] = peak
+        peak = max(trade.peak_r or 0.0, r)
+        trade.peak_r = peak   # persisted on the Trade row -> survives restart
 
         new_sl: float | None = None
         if peak >= 3:
@@ -214,4 +211,5 @@ class RiskManager:
         return None
 
     def forget_trade(self, trade_id: int) -> None:
-        self._trade_peak_r.pop(trade_id, None)
+        # No-op: the peak now lives on the Trade row; nothing in-memory to clear.
+        return None

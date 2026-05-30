@@ -99,6 +99,7 @@ class Trade(Base):
     indicators_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
     take_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    peak_r: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")  # trailing peak (R), persists across restarts
     sl_hit: Mapped[bool] = mapped_column(Boolean, default=False)
     tp_hit: Mapped[bool] = mapped_column(Boolean, default=False)
     manual_close: Mapped[bool] = mapped_column(Boolean, default=False)

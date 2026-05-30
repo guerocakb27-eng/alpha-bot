@@ -280,7 +280,7 @@ class ExecutionEngine:
                     if new_sl is not None:
                         logger.info("Trailing stop #{}: {:.2f} → {:.2f}", trade.id, trade.stop_loss, new_sl)
                         trade.stop_loss = new_sl
-                        db.commit()
+                    db.commit()  # persist trailing peak_r each cycle so it survives restart
 
                 before = trade.status
                 self.check_and_close(trade, price, db, reason="auto")

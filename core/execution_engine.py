@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config import settings
+from core.reconciliation import find_discrepancies
 from core.risk_manager import RiskManager, TradePlan
 from core.signal_engine import SignalResult
 from database.models import EventSeverity, EventType, SessionLocal, Trade, TradeMode, TradeSide, TradeStatus
@@ -96,6 +97,31 @@ class ExecutionEngine:
     def _live_allowed(self) -> bool:
         """Live orders require the explicit ENABLE_LIVE_TRADING flag AND validated keys."""
         return bool(settings.enable_live_trading) and self._validated
+
+    def reconcile(self) -> list:
+        """Detect DB↔exchange discrepancies and alert loudly. No-op in paper mode
+        (the DB/VirtualBroker is the source of truth). Degrades safely if the
+        exchange call fails. Detection only — auto-heal (closing orphaned DB trades)
+        is deferred until spot order/position semantics are validated on testnet."""
+        if self.paper:
+            return []
+        try:
+            orders = self.exchange.fetch_open_orders()
+            exch_ids = {str(o.get("id")) for o in orders if o.get("id") is not None}
+        except Exception as e:
+            logger.error("reconcile: fetch_open_orders failed: {}", e)
+            return []
+        with SessionLocal() as db:
+            open_trades = list(db.scalars(select(Trade).where(Trade.status == TradeStatus.OPEN)))
+            discr = find_discrepancies(open_trades, exch_ids)
+            for d in discr:
+                logger.warning("RECONCILE {}: {}", d.kind, d.detail)
+            if discr:
+                log_event(db, EventType.ERROR,
+                          f"Reconciliation found {len(discr)} discrepancy(ies) — manual review advised",
+                          EventSeverity.CRITICAL,
+                          event_metadata={"discrepancies": [d.detail for d in discr]})
+        return discr
 
     # ─── Initialization ───────────────────────────────────────────────
     async def validate_permissions(self) -> None:

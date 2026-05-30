@@ -80,9 +80,22 @@ class ExecutionEngine:
     def __init__(self, exchange, risk: RiskManager | None = None, paper: bool | None = None, broker: VirtualBroker | None = None) -> None:
         self.exchange = exchange
         self.risk = risk or RiskManager()
-        self.paper = settings.paper_trading if paper is None else paper
-        self.broker = broker or (VirtualBroker() if self.paper else None)
+        # paper=None -> follow the live runtime mode (bot_state) so the API toggle is real.
+        # paper=True/False -> hard override (tests, paper-only construction).
+        self._paper_override = paper
+        self.broker = broker or VirtualBroker()
         self._validated = False
+
+    @property
+    def paper(self) -> bool:
+        if self._paper_override is not None:
+            return self._paper_override
+        from core.bot_state import state  # local import avoids import-time coupling
+        return state.mode != "LIVE"
+
+    def _live_allowed(self) -> bool:
+        """Live orders require the explicit ENABLE_LIVE_TRADING flag AND validated keys."""
+        return bool(settings.enable_live_trading) and self._validated
 
     # ─── Initialization ───────────────────────────────────────────────
     async def validate_permissions(self) -> None:
@@ -125,12 +138,12 @@ class ExecutionEngine:
                           event_metadata={"symbol": signal.symbol, "signal": signal.signal})
                 return None
 
-            plan = self.risk.build_plan(signal.signal, current_price, atr, bal)
+            plan = self.risk.build_plan(signal.signal, current_price, atr, bal, size_multiplier=check.size_multiplier)
             if plan.size_usdt < 10:
                 logger.info("Position too small (${:.2f}), skipping", plan.size_usdt)
                 return None
 
-            fill = self._fill_entry(plan)
+            fill = self._fill_entry(plan, signal.symbol)
             if not fill.filled:
                 logger.warning("Entry fill failed: {}", fill.reason)
                 return None
@@ -164,24 +177,30 @@ class ExecutionEngine:
             logger.info("Opened {} {} #{} @ {:.2f}", plan.side, signal.symbol, trade.id, fill.price)
             return trade
 
-    def _fill_entry(self, plan: TradePlan) -> FillResult:
+    def _fill_entry(self, plan: TradePlan, symbol: str) -> FillResult:
         if self.paper:
             return self.broker.fill_market(plan.side, plan.entry, plan.quantity)
-        # Live path: try LIMIT 1-tick aggressive, fall back to MARKET after 10s
+        if not self._live_allowed():
+            logger.error("Live entry blocked: enable_live_trading={} validated={}",
+                         settings.enable_live_trading, self._validated)
+            return FillResult(False, 0, 0, "", "live_trading_disabled")
+        # Live path: aggressive LIMIT for one tick, fall back to MARKET after ~10s.
+        side = plan.side.lower()
+        client_id = f"alpha-{uuid.uuid4().hex[:16]}"  # idempotency: dedup on restart/retry
         try:
             tick_offset = plan.entry * 0.0001
             limit_px = plan.entry + tick_offset if plan.side == "BUY" else plan.entry - tick_offset
-            order = self.exchange.create_order(plan.entry_price if False else "", "limit", plan.side.lower(), plan.quantity, limit_px)
-            # Wait for fill (poll up to 10s)
+            order = self.exchange.create_order(symbol, "limit", side, plan.quantity, limit_px,
+                                               {"clientOrderId": client_id})
             for _ in range(20):
                 time.sleep(0.5)
-                status = self.exchange.fetch_order(order["id"])
-                if status["status"] in ("closed", "filled"):
-                    return FillResult(True, float(status["price"]), float(status.get("fee", {}).get("cost", 0)), order["id"])
-            # Cancel limit, fire market
-            self.exchange.cancel_order(order["id"])
-            market = self.exchange.create_order("", "market", plan.side.lower(), plan.quantity)
-            return FillResult(True, float(market["price"]), float(market.get("fee", {}).get("cost", 0)), market["id"])
+                st = self.exchange.fetch_order(order["id"], symbol)
+                if st["status"] in ("closed", "filled"):
+                    return FillResult(True, float(st["price"]), float(st.get("fee", {}).get("cost", 0) or 0), order["id"])
+            self.exchange.cancel_order(order["id"], symbol)
+            mkt = self.exchange.create_order(symbol, "market", side, plan.quantity, None,
+                                             {"clientOrderId": f"{client_id}-m"})
+            return FillResult(True, float(mkt["price"]), float(mkt.get("fee", {}).get("cost", 0) or 0), mkt["id"])
         except Exception as e:
             logger.error("Live entry failed: {}", e)
             return FillResult(False, 0, 0, "", str(e))

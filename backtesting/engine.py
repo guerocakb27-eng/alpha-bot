@@ -1,54 +1,36 @@
-"""Minimal walk-forward backtester for Phase 1.
+"""Walk-forward backtester.
 
-Replays historical OHLCV bar-by-bar, asks SignalEngine for a signal at each
-bar, opens a position when score crosses MIN_SIGNAL_SCORE, exits on SL/TP
-or opposite signal. Position size = 1 unit, no fees in this Phase 1 stub —
-full risk-managed backtest comes in Phase 4.
+Replays historical OHLCV bar-by-bar, asks SignalEngine for a signal on each
+CLOSED bar, then acts on the NEXT bar's open via the pure `simulate()` core.
+The decision/execution split removes the same-bar lookahead that the original
+Phase-1 stub had, and `simulate()` deducts fees + slippage so results track live.
 """
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from datetime import datetime
 
-import numpy as np
-import pandas as pd
-
-from backtesting.metrics import max_drawdown, profit_factor, sharpe_ratio, sortino_ratio, win_rate
+from backtesting.simulator import Bar, BacktestResult, Trade, simulate
 from core.signal_engine import SignalEngine
 
-
-@dataclass
-class Trade:
-    entry_time: datetime
-    side: str
-    entry: float
-    exit_time: datetime | None = None
-    exit: float | None = None
-    pnl: float = 0.0
-    sl: float = 0.0
-    tp: float = 0.0
-
-
-@dataclass
-class BacktestResult:
-    total_return: float
-    win_rate: float
-    sharpe: float
-    sortino: float
-    max_drawdown: float
-    profit_factor: float
-    trade_log: list[Trade] = field(default_factory=list)
-    equity_curve: pd.Series | None = None
+__all__ = ["Backtester", "BacktestResult", "Trade", "Bar"]
 
 
 class Backtester:
-    """Walk-forward backtest. Single position at a time, no fees, fixed unit size."""
+    """Walk-forward backtest. Single position at a time; fee + slippage aware."""
 
-    def __init__(self, sl_atr_mult: float = 1.5, tp_atr_mult: float = 3.0, min_score: int = 65) -> None:
+    def __init__(
+        self,
+        sl_atr_mult: float = 1.5,
+        tp_atr_mult: float = 3.0,
+        min_score: int = 65,
+        fee: float = 0.001,
+        slippage: float = 0.0005,
+    ) -> None:
         self.sl_atr_mult = sl_atr_mult
         self.tp_atr_mult = tp_atr_mult
         self.min_score = min_score
+        self.fee = fee
+        self.slippage = slippage
 
     async def run(
         self,
@@ -57,8 +39,6 @@ class Backtester:
         signal_engine: SignalEngine,
         bars_to_test: int = 200,
     ) -> BacktestResult:
-        # Single backtest: replay last `bars_to_test` bars. Walk-forward not done here
-        # to keep Phase 1 runtime cheap; engine.py upgrade scheduled for Phase 5.
         rows = await asyncio.to_thread(
             signal_engine.exchange.fetch_ohlcv, symbol, timeframe, None, bars_to_test + 250
         )
@@ -67,68 +47,43 @@ class Backtester:
 
         from core.signal_engine import _ohlcv_to_df  # local import to avoid cycle on first import
         full_df = _ohlcv_to_df(rows)
+        return await self.run_on_df(full_df, signal_engine, symbol, timeframe)
 
-        trades: list[Trade] = []
-        open_trade: Trade | None = None
-        equity = [1000.0]
-
-        # Slide window forward; recompute signal off the trailing 250-bar window.
-        for i in range(250, len(full_df)):
+    async def run_on_df(
+        self,
+        full_df,
+        signal_engine: SignalEngine,
+        symbol: str,
+        timeframe: str,
+        warmup: int = 250,
+    ) -> BacktestResult:
+        """Replay an already-fetched OHLCV frame. Decide on the CLOSED bar i, act at
+        bar i+1's open. Network-free, so it is deterministic and testable."""
+        bars: list[Bar] = []
+        for i in range(warmup, len(full_df) - 1):
             window = full_df.iloc[: i + 1]
-            close = float(window["close"].iloc[-1])
-            ts = window.index[-1]
-
-            # Quick local replay: compute regime + score using SignalEngine helpers on the window.
             try:
-                # Reuse engine.analyze logic by monkey-feeding the window via a custom fetch.
                 result = await self._score_window(signal_engine, window, symbol, timeframe)
+                signal, score, atr_val = result.signal, result.final_score, result.extras.get("atr_14")
             except Exception:
-                equity.append(equity[-1])
-                continue
+                # Keep the bar so its price action still drives SL/TP exits, but take no new entry.
+                signal, score, atr_val = "NEUTRAL", 0, None
+            nxt = full_df.iloc[i + 1]
+            bars.append(Bar(
+                ts=full_df.index[i + 1],
+                open=float(nxt["open"]), high=float(nxt["high"]),
+                low=float(nxt["low"]), close=float(nxt["close"]),
+                signal=signal, score=score,
+                atr=float(atr_val) if atr_val else float(nxt["close"]) * 0.01,
+            ))
 
-            # Exit logic
-            if open_trade:
-                hit_sl = (open_trade.side == "BUY" and close <= open_trade.sl) or (open_trade.side == "SELL" and close >= open_trade.sl)
-                hit_tp = (open_trade.side == "BUY" and close >= open_trade.tp) or (open_trade.side == "SELL" and close <= open_trade.tp)
-                opposite = (open_trade.side == "BUY" and result.signal == "SELL") or (open_trade.side == "SELL" and result.signal == "BUY")
-                if hit_sl or hit_tp or opposite:
-                    open_trade.exit_time = ts
-                    open_trade.exit = close
-                    if open_trade.side == "BUY":
-                        open_trade.pnl = (close - open_trade.entry) / open_trade.entry * 100
-                    else:
-                        open_trade.pnl = (open_trade.entry - close) / open_trade.entry * 100
-                    trades.append(open_trade)
-                    equity.append(equity[-1] * (1 + open_trade.pnl / 100))
-                    open_trade = None
-                else:
-                    equity.append(equity[-1])
-            else:
-                equity.append(equity[-1])
-
-            # Entry logic
-            if not open_trade and result.signal in ("BUY", "SELL") and abs(result.final_score) >= self.min_score:
-                atr_val = result.extras.get("atr_14") or close * 0.01
-                if result.signal == "BUY":
-                    sl = close - self.sl_atr_mult * atr_val
-                    tp = close + self.tp_atr_mult * atr_val
-                else:
-                    sl = close + self.sl_atr_mult * atr_val
-                    tp = close - self.tp_atr_mult * atr_val
-                open_trade = Trade(entry_time=ts, side=result.signal, entry=close, sl=sl, tp=tp)
-
-        equity_series = pd.Series(equity, index=full_df.index[249:249 + len(equity)])
-        returns = equity_series.pct_change().fillna(0)
-        pnls = [t.pnl for t in trades]
-        return BacktestResult(
-            total_return=(equity_series.iloc[-1] / equity_series.iloc[0] - 1) * 100,
-            win_rate=win_rate(pnls) * 100,
-            sharpe=sharpe_ratio(returns),
-            sortino=sortino_ratio(returns),
-            max_drawdown=max_drawdown(equity_series) * 100,
-            profit_factor=profit_factor(pnls),
-            trade_log=trades,
-            equity_curve=equity_series,
+        return simulate(
+            bars,
+            fee=self.fee,
+            slippage=self.slippage,
+            min_score=self.min_score,
+            sl_atr_mult=self.sl_atr_mult,
+            tp_atr_mult=self.tp_atr_mult,
         )
 
     async def _score_window(self, engine: SignalEngine, window: pd.DataFrame, symbol: str, timeframe: str):
@@ -139,7 +94,7 @@ class Backtester:
         from indicators import momentum, patterns, trend, volatility, volume
         from config import INDICATOR_WEIGHTS_WITHIN_LAYER, WEIGHTS_BY_REGIME
         from core.signal_engine import SignalResult
-        from datetime import timezone
+        from datetime import datetime, timezone
 
         df = window
         regime = MarketRegimeDetector().detect(df)

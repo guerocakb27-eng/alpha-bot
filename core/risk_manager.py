@@ -26,11 +26,18 @@ MAX_ATR_PCT = 5.0
 MIN_SL_PCT = 0.5
 MAX_SL_PCT = 5.0
 
+# Tiered drawdown circuit breaker (percent; applied to summed trade pnl_pct +
+# unrealized). Anti-martingale: these tiers only ever REDUCE size or HALT trading.
+DAY_SOFT_LOSS_PCT = 3.0                  # -3% day  -> open new trades at half size
+DAY_HARD_LOSS_PCT = MAX_DAILY_LOSS_PCT   # -5% day  -> no new trades today
+WEEK_HARD_LOSS_PCT = 10.0                # -10% week -> full stop until manual restart
+
 
 @dataclass
 class TradeCheck:
     allowed: bool
     reason: str = ""
+    size_multiplier: float = 1.0   # <1.0 when a soft circuit-breaker tier is active
 
 
 @dataclass
@@ -43,6 +50,20 @@ class TradePlan:
     size_usdt: float
     risk_usdt: float
     rr_ratio: float
+
+
+def circuit_breaker_action(day_loss_pct: float, week_loss_pct: float) -> str:
+    """Map signed day/week loss percentages (losses negative) to a trading action.
+
+    Returns NORMAL, HALVE, NO_NEW, or FULL_STOP. Weekly full-stop takes precedence.
+    """
+    if week_loss_pct <= -WEEK_HARD_LOSS_PCT:
+        return "FULL_STOP"
+    if day_loss_pct <= -DAY_HARD_LOSS_PCT:
+        return "NO_NEW"
+    if day_loss_pct <= -DAY_SOFT_LOSS_PCT:
+        return "HALVE"
+    return "NORMAL"
 
 
 class RiskManager:
@@ -59,19 +80,29 @@ class RiskManager:
         symbol: str,
         balance_usdt: float,
         atr_pct: float,
+        day_unrealized_pct: float = 0.0,
     ) -> TradeCheck:
-        # Daily loss limit
-        since = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        today_pnl = sum(t.pnl_pct for t in db.scalars(
-            select(Trade).where(Trade.status == TradeStatus.CLOSED, Trade.exit_time >= since)
+        # Tiered drawdown circuit breaker — include open positions' unrealized PnL,
+        # not just closed trades, so the breaker can fire before losses are realized.
+        now = datetime.now(timezone.utc)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = now - timedelta(days=7)
+        day_realized = sum(t.pnl_pct for t in db.scalars(
+            select(Trade).where(Trade.status == TradeStatus.CLOSED, Trade.exit_time >= day_start)
         ))
-        if today_pnl < -MAX_DAILY_LOSS_PCT:
-            return TradeCheck(False, f"daily_loss_limit ({today_pnl:.2f}% < -{MAX_DAILY_LOSS_PCT}%)")
+        week_realized = sum(t.pnl_pct for t in db.scalars(
+            select(Trade).where(Trade.status == TradeStatus.CLOSED, Trade.exit_time >= week_start)
+        ))
+        day_loss = day_realized + day_unrealized_pct
+        week_loss = week_realized + day_unrealized_pct
+        action = circuit_breaker_action(day_loss, week_loss)
+        if action == "FULL_STOP":
+            return TradeCheck(False, f"weekly_drawdown_full_stop ({week_loss:.2f}% ≤ -{WEEK_HARD_LOSS_PCT}%)")
+        if action == "NO_NEW":
+            return TradeCheck(False, f"daily_loss_limit ({day_loss:.2f}% ≤ -{DAY_HARD_LOSS_PCT}%)")
+        size_multiplier = 0.5 if action == "HALVE" else 1.0
 
         # Concurrent positions
-        open_count = db.scalar(
-            select(Trade).where(Trade.status == TradeStatus.OPEN).with_only_columns(Trade.id)
-        )
         open_n = len(list(db.scalars(select(Trade).where(Trade.status == TradeStatus.OPEN))))
         if open_n >= MAX_OPEN_POSITIONS:
             return TradeCheck(False, f"max_open_positions ({open_n} ≥ {MAX_OPEN_POSITIONS})")
@@ -94,10 +125,9 @@ class RiskManager:
         if atr_pct > MAX_ATR_PCT:
             return TradeCheck(False, f"volatility_filter (ATR/price {atr_pct:.2f}% > {MAX_ATR_PCT}%)")
 
-        # Correlation check is deferred — would need a price-matrix calculator.
-        # Skipped for Phase 4 (single-symbol focused), planned for Phase 5.
+        # Correlation check is deferred — would need a price-matrix calculator (Phase C).
 
-        return TradeCheck(True)
+        return TradeCheck(True, size_multiplier=size_multiplier)
 
     # ─── Position sizing ──────────────────────────────────────────────
     def position_size(self, balance_usdt: float, entry: float, stop_loss: float) -> tuple[float, float]:
@@ -134,10 +164,13 @@ class RiskManager:
         risk = abs(entry - stop_loss)
         return entry + RR_RATIO * risk if side == "BUY" else entry - RR_RATIO * risk
 
-    def build_plan(self, side: str, entry: float, atr: float, balance_usdt: float) -> TradePlan:
+    def build_plan(self, side: str, entry: float, atr: float, balance_usdt: float,
+                   size_multiplier: float = 1.0) -> TradePlan:
         sl = self.stop_loss(side, entry, atr)
         tp = self.take_profit(side, entry, sl)
         qty, notional = self.position_size(balance_usdt, entry, sl)
+        qty *= size_multiplier        # circuit-breaker HALVE tier only ever reduces size
+        notional *= size_multiplier
         risk = abs(entry - sl) * qty
         return TradePlan(
             side=side, entry=entry, stop_loss=sl, take_profit=tp,

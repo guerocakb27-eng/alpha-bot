@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     )
 
     paper_trading: bool = True
+    # Hard gate: live orders are refused unless this is explicitly True (defense in
+    # depth — a mis-set PAPER/LIVE toggle can never place real orders on its own).
+    enable_live_trading: bool = False
     binance_testnet: bool = True
     binance_api_key: str = ""
     binance_secret: str = ""

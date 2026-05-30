@@ -68,6 +68,8 @@ def change_mode(payload: ModeChange = Body(...), db: Session = Depends(get_db)) 
         raise HTTPException(400, "mode must be PAPER or LIVE")
     if payload.mode == "LIVE" and not payload.confirm_live:
         raise HTTPException(400, "Switching to LIVE requires confirm_live=true")
+    if payload.mode == "LIVE" and not settings.enable_live_trading:
+        raise HTTPException(400, "LIVE blocked: set ENABLE_LIVE_TRADING=true to allow live trading")
     old = bot_state.mode
     bot_state.mode = payload.mode
     repository.log_event(

@@ -23,6 +23,7 @@ from loguru import logger
 from config import INDICATOR_WEIGHTS_WITHIN_LAYER, MIN_SIGNAL_SCORE, WEIGHTS_BY_REGIME, settings
 from core import _scoring as sc
 from core.market_regime import MarketRegimeDetector, Regime
+from core.multi_timeframe import TF_RULE, higher_timeframes, mtf_consensus, resample_ohlcv
 from core.sentiment_engine import SentimentEngine, SentimentScore
 from indicators import momentum, patterns, trend, volatility, volume
 
@@ -81,6 +82,28 @@ def aggregate_layers(
     return int(round(max(-100, min(100, base))))
 
 
+def _confirm_mtf(df: pd.DataFrame, base_tf: str, base_final: int, min_score: int) -> int:
+    """Resample to higher TFs, score each, and combine via cross-TF consensus (Phase C2)."""
+    highs = higher_timeframes(base_tf)
+    if not highs:
+        return base_final
+    tf_scores = {base_tf: base_final}
+    tf_weights = {base_tf: 1.0}
+    for i, htf in enumerate(highs):
+        rule = TF_RULE.get(htf)
+        if not rule:
+            continue
+        hdf = resample_ohlcv(df, rule)
+        if len(hdf) < 30:   # not enough higher-TF history to trust a confirmation
+            continue
+        hregime = MarketRegimeDetector().detect(hdf)
+        hres = score_signal(hdf, hregime, symbol="MTF", timeframe=htf,
+                            min_score=min_score, sentiment=None, mtf=False)
+        tf_scores[htf] = hres.final_score
+        tf_weights[htf] = 2.0 + i
+    return mtf_consensus(tf_scores, tf_weights)
+
+
 def score_signal(
     df: pd.DataFrame,
     regime: Regime,
@@ -89,6 +112,7 @@ def score_signal(
     timeframe: str,
     min_score: int = MIN_SIGNAL_SCORE,
     sentiment: SentimentScore | None = None,
+    mtf: bool | None = None,
 ) -> SignalResult:
     """Score a prepared OHLCV frame into a regime-weighted SignalResult.
 
@@ -212,9 +236,11 @@ def score_signal(
         layer_scores[layer_name] = int(round(total))
     layer_scores["sentiment"] = int(round(sentiment.composite_score)) if sentiment else 0
 
-    # ─── Regime-weighted final score (aggregation mode is a runtime toggle) ──
+    # ─── Regime-weighted final score (aggregation + MTF are runtime toggles) ──
     regime_weights = WEIGHTS_BY_REGIME[regime.value]
     final_score = aggregate_layers(layer_scores, regime_weights, settings.aggregation_mode)
+    if (settings.mtf_enabled if mtf is None else mtf):
+        final_score = _confirm_mtf(df, timeframe, final_score, min_score)
 
     sign = 0 if final_score == 0 else (1 if final_score > 0 else -1)
     conf = sc.confidence(list(scores.values()), sign)

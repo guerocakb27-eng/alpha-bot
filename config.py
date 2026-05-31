@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     # Signal aggregation: "weighted" (legacy regime-weighted average) or "confluence"
     # (dampen conflicting layers via cross-family consensus). Default off = weighted.
     aggregation_mode: str = "weighted"
+    # Multi-timeframe confirmation: gate the signal by higher-TF agreement. Default off.
+    mtf_enabled: bool = False
 
 
 settings = Settings()

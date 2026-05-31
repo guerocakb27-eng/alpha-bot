@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     binance_api_key: str = ""
     binance_secret: str = ""
 
+    # Dead-man's switch: if the exchange is unreachable for longer than the timeout,
+    # alert loudly (and flatten open positions only if explicitly enabled).
+    deadman_timeout_s: int = 180
+    deadman_flatten: bool = False
+
     database_url: str = "sqlite:///./trading_bot.db"
     redis_url: str = "redis://localhost:6379/0"
     webhook_secret: str = "change_me"

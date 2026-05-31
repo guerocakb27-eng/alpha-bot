@@ -131,6 +131,10 @@ class BotLoop:
                 logger.warning("analyze({}) failed: {}", symbol, e)
                 continue
 
+        # (Dead-man's-switch heartbeat is NOT refreshed here: analyze() uses the PUBLIC
+        # fetch_ohlcv, and public reachability must not keep the switch alive while
+        # authenticated access is down. The heartbeat comes only from authenticated calls.)
+
         # 2. Persist signals + broadcast
         for symbol, result in results:
             with SessionLocal() as db:
@@ -195,6 +199,22 @@ class BotLoop:
         except Exception as e:
             logger.warning("monitor_positions failed: {}", e)
             closed = []
+
+        # 4b. Safety: reconcile DB↔exchange + dead-man's switch (live-only; paper no-op).
+        try:
+            self.execution_engine.reconcile()
+        except Exception as e:
+            logger.warning("reconcile failed: {}", e)
+        deadman = self.execution_engine.deadman_check()
+        if deadman != "OK":
+            logger.critical("DEAD-MAN'S SWITCH ({}): authenticated exchange contact lost", deadman)
+            if deadman == "FLATTEN":
+                try:
+                    res = self.execution_engine.flatten_all(current_prices)
+                    logger.critical("Dead-man flatten: closed={} FAILED={} blocked={}",
+                                    res["closed"], res["failed"], res["blocked"])
+                except Exception as e:
+                    logger.error("flatten_all failed: {}", e)
 
         # 5. Learning + notifications for closed trades
         for trade in closed:

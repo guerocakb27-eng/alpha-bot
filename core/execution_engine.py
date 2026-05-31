@@ -17,6 +17,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config import settings
+from core.deadman import deadman_triggered
+from core.reconciliation import find_discrepancies
 from core.risk_manager import RiskManager, TradePlan
 from core.signal_engine import SignalResult
 from database.models import EventSeverity, EventType, SessionLocal, Trade, TradeMode, TradeSide, TradeStatus
@@ -85,6 +87,9 @@ class ExecutionEngine:
         self._paper_override = paper
         self.broker = broker or VirtualBroker()
         self._validated = False
+        # 0.0 => the dead-man's switch stays "stale" until a real AUTHENTICATED exchange
+        # call succeeds. Fail-safe: never report OK before we have actually reached auth.
+        self.last_exchange_contact = 0.0
 
     @property
     def paper(self) -> bool:
@@ -96,6 +101,81 @@ class ExecutionEngine:
     def _live_allowed(self) -> bool:
         """Live orders require the explicit ENABLE_LIVE_TRADING flag AND validated keys."""
         return bool(settings.enable_live_trading) and self._validated
+
+    def reconcile(self) -> list:
+        """Detect DB↔exchange discrepancies and alert loudly. No-op in paper mode
+        (the DB/VirtualBroker is the source of truth). Degrades safely if the
+        exchange call fails. Detection only — auto-heal (closing orphaned DB trades)
+        is deferred until spot order/position semantics are validated on testnet."""
+        if self.paper:
+            return []
+        try:
+            orders = self.exchange.fetch_open_orders()
+            self.mark_contact()   # authenticated call succeeded -> dead-man's switch heartbeat
+            exch_ids = {str(o.get("id")) for o in orders if o.get("id") is not None}
+        except Exception as e:
+            logger.error("reconcile: fetch_open_orders failed: {}", e)
+            return []
+        with SessionLocal() as db:
+            open_trades = list(db.scalars(select(Trade).where(Trade.status == TradeStatus.OPEN)))
+            discr = find_discrepancies(open_trades, exch_ids)
+            for d in discr:
+                logger.warning("RECONCILE {}: {}", d.kind, d.detail)
+            if discr:
+                log_event(db, EventType.ERROR,
+                          f"Reconciliation found {len(discr)} discrepancy(ies) — manual review advised",
+                          EventSeverity.CRITICAL,
+                          event_metadata={"discrepancies": [d.detail for d in discr]})
+        return discr
+
+    def mark_contact(self) -> None:
+        """Record a successful exchange interaction (resets the dead-man's switch)."""
+        self.last_exchange_contact = time.time()
+
+    def deadman_check(self, now: float | None = None) -> str:
+        """OK | ALERT | FLATTEN by time since last exchange contact. Paper mode has no
+        live exchange to lose, so it is always OK."""
+        if self.paper:
+            return "OK"
+        now = time.time() if now is None else now
+        if not deadman_triggered(self.last_exchange_contact, now, settings.deadman_timeout_s):
+            return "OK"
+        return "FLATTEN" if settings.deadman_flatten else "ALERT"
+
+    def _market_price(self, symbol: str) -> float | None:
+        """Best-effort current price for an emergency close, self-sourced so it does not
+        depend on the data path whose failure may have triggered the flatten."""
+        try:
+            return float(self.exchange.fetch_ticker(symbol)["last"])
+        except Exception as e:
+            logger.error("flatten_all: cannot price {}: {}", symbol, e)
+            return None
+
+    def flatten_all(self, current_prices: dict | None = None) -> dict:
+        """Emergency close of all open positions (dead-man's switch). This is a discretionary
+        mass action, so it IS gated by the live kill-switch. Self-sources a fallback price per
+        trade rather than trusting the (possibly-failed) cycle data, and reports trades it could
+        NOT close instead of silently claiming success. Live behavior is testnet-validated."""
+        current_prices = current_prices or {}
+        if not self.paper and not self._live_allowed():
+            logger.critical("flatten_all BLOCKED: live kill-switch off — positions NOT closed, manage manually")
+            return {"closed": [], "failed": [], "blocked": True}
+        closed: list[int] = []
+        failed: list[int] = []
+        with SessionLocal() as db:
+            for trade in list(db.scalars(select(Trade).where(Trade.status == TradeStatus.OPEN))):
+                price = current_prices.get(trade.symbol)
+                if price is None and not self.paper:
+                    price = self._market_price(trade.symbol)
+                if price is None:
+                    failed.append(trade.id)
+                    logger.critical("flatten_all: no price for {} (#{}) — NOT closed", trade.symbol, trade.id)
+                    continue
+                self.check_and_close(trade, price, db, reason="deadman_flatten")
+                (closed if trade.status == TradeStatus.CLOSED else failed).append(trade.id)
+        if failed:
+            logger.critical("flatten_all could NOT close {} trade(s): {}", len(failed), failed)
+        return {"closed": closed, "failed": failed, "blocked": False}
 
     # ─── Initialization ───────────────────────────────────────────────
     async def validate_permissions(self) -> None:
@@ -118,6 +198,7 @@ class ExecutionEngine:
             return self.broker.balance_usdt
         try:
             data = self.exchange.fetch_balance()
+            self.mark_contact()
             return float(data["total"].get("USDT", 0))
         except Exception as e:
             logger.error("fetch_balance failed: {}", e)
@@ -129,6 +210,7 @@ class ExecutionEngine:
             return None
 
         with SessionLocal() as db:
+            self.risk.refresh(db)   # apply any BotSettings risk-param changes at runtime
             bal = self.balance()
             atr_pct = (atr / current_price) * 100
             check = self.risk.pre_trade_check(db, signal.symbol, bal, atr_pct)
@@ -192,6 +274,7 @@ class ExecutionEngine:
             limit_px = plan.entry + tick_offset if plan.side == "BUY" else plan.entry - tick_offset
             order = self.exchange.create_order(symbol, "limit", side, plan.quantity, limit_px,
                                                {"clientOrderId": client_id})
+            self.mark_contact()   # authenticated call succeeded
             for _ in range(20):
                 time.sleep(0.5)
                 st = self.exchange.fetch_order(order["id"], symbol)
@@ -255,9 +338,14 @@ class ExecutionEngine:
     def _fill_exit(self, trade: Trade, price: float) -> FillResult:
         if self.paper:
             return self.broker.close_position(trade, price)
+        # NOTE: exits are intentionally NOT behind _live_allowed(). ENABLE_LIVE_TRADING gates
+        # NEW exposure (entries) and the discretionary mass-flatten; a risk-REDUCING SL/TP exit
+        # on an already-open live position must never be blocked, or it could be left without
+        # its stop. Discretionary mass-close is gated in flatten_all() instead.
         try:
             side = "sell" if (trade.side.value if hasattr(trade.side, "value") else trade.side) == "BUY" else "buy"
             order = self.exchange.create_order(trade.symbol, "market", side, trade.quantity)
+            self.mark_contact()   # authenticated call succeeded
             return FillResult(True, float(order["price"]), float(order.get("fee", {}).get("cost", 0)), order["id"])
         except Exception as e:
             return FillResult(False, 0, 0, "", str(e))

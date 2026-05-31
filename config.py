@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     volume_gate_enabled: bool = False
     freshness_enabled: bool = False
     structure_filter_enabled: bool = False
+    # Phase C5 strategy ensemble (curated, regime-adaptive vote). Default off; each
+    # strategy also ships individually disabled until it shows positive OOS edge.
+    strategy_ensemble_enabled: bool = False
 
 
 settings = Settings()

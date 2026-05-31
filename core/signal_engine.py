@@ -28,8 +28,11 @@ from core.quality_filters import market_structure, signal_freshness, volume_conf
 from core.multi_timeframe import TF_RULE, higher_timeframes, mtf_consensus, resample_ohlcv
 from core.sentiment_engine import SentimentEngine, SentimentScore
 from indicators import momentum, patterns, trend, volatility, volume
+from strategies import default_ensemble
 
 Signal = Literal["BUY", "SELL", "NEUTRAL"]
+
+_ENSEMBLE = default_ensemble()   # curated strategies; all ship disabled (Phase C5)
 
 
 @dataclass
@@ -271,6 +274,13 @@ def score_signal(
         fr = signal_freshness(ema_vals[9], ema_vals[21])
         quality["freshness"] = fr
         final_score = int(round(final_score * fr))
+
+    # ─── Phase C5 strategy ensemble (runtime toggle, default off) ──────
+    if settings.strategy_ensemble_enabled:
+        ens = _ENSEMBLE.combine(df, regime)
+        scores["ensemble"] = ens.score   # observability; nudges only with a confident, directional vote
+        if ens.confidence > 0 and ens.score != 0:
+            final_score = int(round(max(-100, min(100, 0.6 * final_score + 0.4 * ens.score))))
 
     sign = 0 if final_score == 0 else (1 if final_score > 0 else -1)
     conf = sc.confidence(list(scores.values()), sign)

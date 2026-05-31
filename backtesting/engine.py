@@ -86,81 +86,12 @@ class Backtester:
             tp_atr_mult=self.tp_atr_mult,
         )
 
-    async def _score_window(self, engine: SignalEngine, window: pd.DataFrame, symbol: str, timeframe: str):
-        # Reuse the analyze pipeline by injecting the window directly. We replicate the body
-        # of analyze() here to avoid a network call per bar.
-        from core import _scoring as sc
+    async def _score_window(self, engine, window: pd.DataFrame, symbol: str, timeframe: str):
+        """Score one historical window through the SAME path as live analyze()
+        (core.signal_engine.score_signal), so the backtest can never diverge from live.
+        `engine` is unused (kept for call-site/signature compatibility)."""
         from core.market_regime import MarketRegimeDetector
-        from indicators import momentum, patterns, trend, volatility, volume
-        from config import INDICATOR_WEIGHTS_WITHIN_LAYER, WEIGHTS_BY_REGIME
-        from core.signal_engine import SignalResult
-        from datetime import datetime, timezone
+        from core.signal_engine import score_signal
 
-        df = window
-        regime = MarketRegimeDetector().detect(df)
-        close = float(df["close"].iloc[-1])
-        scores: dict[str, int] = {}
-
-        ema_vals = trend.ema(df, [9, 21, 50, 200])
-        scores["ema_stack"] = sc.score_ema_stack(close, float(ema_vals[50].iloc[-1]), float(ema_vals[200].iloc[-1]))
-        scores["ema_cross"] = sc.score_ema_cross(float(ema_vals[9].iloc[-1]), float(ema_vals[21].iloc[-1]), float(ema_vals[9].iloc[-2]), float(ema_vals[21].iloc[-2]))
-        st = trend.supertrend(df)
-        scores["supertrend"] = sc.score_supertrend(int(st["direction"].iloc[-1]))
-        adx_vals = trend.adx(df)
-        scores["adx_dir"] = sc.score_adx_direction(float(adx_vals["plus_di"].iloc[-1]), float(adx_vals["minus_di"].iloc[-1]), float(adx_vals["adx"].iloc[-1]))
-        scores["ichimoku"] = 0
-        scores["psar"] = 0
-        scores["vwap"] = 0
-
-        rsi_val = float(momentum.rsi(df, [14])[14].iloc[-1])
-        scores["rsi_14"] = sc.score_rsi(rsi_val)
-        scores["stoch_rsi"] = 0
-        macd_v = momentum.macd(df)
-        hist = macd_v["histogram"].dropna()
-        scores["macd"] = sc.score_macd(float(hist.iloc[-1]), float(hist.iloc[-2])) if len(hist) >= 2 else 0
-        scores["cci"] = sc.score_cci(float(momentum.cci(df).iloc[-1]))
-        scores["williams_r"] = sc.score_williams_r(float(momentum.williams_r(df).iloc[-1]))
-        scores["roc"] = sc.score_roc(float(momentum.roc(df).iloc[-1]))
-        scores["tsi"] = 0
-        scores["ult_osc"] = 0
-
-        bb = volatility.bollinger_bands(df)
-        scores["bb_percent_b"] = sc.score_bb_percent_b(float(bb["percent_b"].iloc[-1]))
-        scores["bb_width"] = 0
-        scores["keltner"] = 0
-        scores["atr_regime"] = 0
-        scores["bb_squeeze"] = 0
-        scores["donchian"] = 0
-
-        candle_dir = 1 if df["close"].iloc[-1] > df["open"].iloc[-1] else -1
-        scores["rvol"] = sc.score_rvol(float(volume.rvol(df).iloc[-1]), candle_dir)
-        scores["obv_trend"] = 0
-        scores["cmf"] = sc.score_cmf(float(volume.cmf(df).iloc[-1]))
-        scores["mfi"] = sc.score_mfi(float(volume.mfi(df).iloc[-1]))
-        scores["ad_trend"] = 0
-        scores["force_index"] = 0
-        scores["vwma_cross"] = 0
-
-        scores["candles"] = 0
-        scores["support_resist"] = 0
-        scores["chart_patterns"] = 0
-
-        layer_scores: dict[str, int] = {}
-        for layer_name, weights in INDICATOR_WEIGHTS_WITHIN_LAYER.items():
-            layer_scores[layer_name] = int(round(sum(scores.get(k, 0) * w for k, w in weights.items())))
-        layer_scores["sentiment"] = 0
-
-        regime_weights = WEIGHTS_BY_REGIME[regime.value]
-        final = sum(layer_scores[k] * regime_weights[k] for k in regime_weights)
-        final_score = int(round(max(-100, min(100, final))))
-
-        sign = 0 if final_score == 0 else (1 if final_score > 0 else -1)
-        conf = sc.confidence(list(scores.values()), sign)
-        signal = "BUY" if final_score >= self.min_score else "SELL" if final_score <= -self.min_score else "NEUTRAL"
-
-        atr_v = float(volatility.atr(df, [14])[14].iloc[-1])
-        return SignalResult(
-            symbol=symbol, timeframe=timeframe, timestamp=datetime.now(timezone.utc),
-            final_score=final_score, signal=signal, confidence=conf, regime=regime,
-            layers=layer_scores, indicators_detail=scores, extras={"close": close, "atr_14": atr_v},
-        )
+        regime = MarketRegimeDetector().detect(window)
+        return score_signal(window, regime, symbol=symbol, timeframe=timeframe, min_score=self.min_score)

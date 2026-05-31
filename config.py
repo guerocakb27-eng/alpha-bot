@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Phase C5 strategy ensemble (curated, regime-adaptive vote). Default off; each
     # strategy also ships individually disabled until it shows positive OOS edge.
     strategy_ensemble_enabled: bool = False
+    # Phase C6 exit management (Chandelier trailing + time-based stale exit in the
+    # backtester; scale-out/parabolic partials are built+tested but not yet wired). Off.
+    exit_management_enabled: bool = False
 
 
 settings = Settings()

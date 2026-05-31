@@ -76,16 +76,6 @@ def score_bb_percent_b(pb: float) -> int:
     return -60
 
 
-def score_bb_width(width_now: float, width_avg: float) -> int:
-    """Squeeze (very narrow) → 0; expansion → directional based on close vs middle (handled elsewhere)."""
-    if width_avg <= 0:
-        return 0
-    ratio = width_now / width_avg
-    if ratio < 0.6:   return 0    # squeeze, no directional bias from width alone
-    if ratio > 1.5:   return 0    # high vol; direction handled by other indicators
-    return 0
-
-
 def score_rvol(rvol_val: float, candle_dir: int) -> int:
     """candle_dir: +1 if green, -1 if red, 0 if doji."""
     if rvol_val < 0.5:           return 0
@@ -200,14 +190,6 @@ def score_force_index(value: float, normalizer: float) -> int:
 def score_vwma_cross(close: float, vwma_val: float) -> int:
     spread = (close - vwma_val) / max(vwma_val, 1e-9)
     return _clamp(spread * 1500)
-
-
-def score_bb_squeeze(in_squeeze: bool) -> int:
-    return 0  # squeeze itself is directionless; regime detector consumes it
-
-
-def score_atr_regime(atr_now: float, atr_avg: float) -> int:
-    return 0  # neutral; volatility regime handled separately
 
 
 def confidence(scores: list[int], final_sign: int) -> int:

@@ -24,11 +24,15 @@ from config import INDICATOR_WEIGHTS_WITHIN_LAYER, MIN_SIGNAL_SCORE, WEIGHTS_BY_
 from core import _scoring as sc
 from core.divergence import detect_divergence
 from core.market_regime import MarketRegimeDetector, Regime
+from core.quality_filters import market_structure, signal_freshness, volume_confirmation
 from core.multi_timeframe import TF_RULE, higher_timeframes, mtf_consensus, resample_ohlcv
 from core.sentiment_engine import SentimentEngine, SentimentScore
 from indicators import momentum, patterns, trend, volatility, volume
+from strategies import default_ensemble
 
 Signal = Literal["BUY", "SELL", "NEUTRAL"]
+
+_ENSEMBLE = default_ensemble()   # curated strategies; all ship disabled (Phase C5)
 
 
 @dataclass
@@ -189,10 +193,6 @@ def score_signal(
     # ─── Volatility layer ───────────────────────────────────
     bb = volatility.bollinger_bands(df)
     scores["bb_percent_b"] = sc.score_bb_percent_b(_last_valid(bb["percent_b"]) or 0.5)
-    scores["bb_width"] = sc.score_bb_width(
-        _last_valid(bb["width"]) or 0,
-        float(bb["width"].dropna().rolling(50).mean().iloc[-1]) if not bb["width"].dropna().empty else 0,
-    )
     kc = volatility.keltner_channel(df)
     scores["keltner"] = sc.score_keltner_position(
         close,
@@ -200,10 +200,7 @@ def score_signal(
         _last_valid(kc["lower"]) or close * 0.99,
         _last_valid(kc["middle"]) or close,
     )
-    atr_vals = volatility.atr(df, [14])[14]
-    atr_avg = float(atr_vals.rolling(50).mean().iloc[-1]) if not atr_vals.dropna().empty else 0
-    scores["atr_regime"] = sc.score_atr_regime(_last_valid(atr_vals) or 0, atr_avg)
-    scores["bb_squeeze"] = sc.score_bb_squeeze(bool(volatility.bb_squeeze(df).iloc[-1]))
+    atr_vals = volatility.atr(df, [14])[14]   # kept for extras["atr_14"]; atr is directionless, no longer scored
     donch = volatility.donchian_channel(df)
     scores["donchian"] = sc.score_donchian_breakout(
         close,
@@ -262,6 +259,29 @@ def score_signal(
         if div != 0:
             final_score = int(round(max(-100, min(100, 0.7 * final_score + 0.3 * div))))
 
+    # ─── Phase C4 quality filters (each a runtime toggle, default off) ──
+    quality: dict[str, float] = {}
+    if settings.structure_filter_enabled:
+        ms = market_structure(df["high"], df["low"])
+        scores["structure"] = ms   # directional, like divergence
+        if ms != 0:
+            final_score = int(round(max(-100, min(100, 0.8 * final_score + 0.2 * ms))))
+    if settings.volume_gate_enabled:
+        vc = volume_confirmation(df["volume"])
+        quality["volume_confirmation"] = vc
+        final_score = int(round(final_score * vc))
+    if settings.freshness_enabled:
+        fr = signal_freshness(ema_vals[9], ema_vals[21])
+        quality["freshness"] = fr
+        final_score = int(round(final_score * fr))
+
+    # ─── Phase C5 strategy ensemble (runtime toggle, default off) ──────
+    if settings.strategy_ensemble_enabled:
+        ens = _ENSEMBLE.combine(df, regime)
+        scores["ensemble"] = ens.score   # observability; nudges only with a confident, directional vote
+        if ens.confidence > 0 and ens.score != 0:
+            final_score = int(round(max(-100, min(100, 0.6 * final_score + 0.4 * ens.score))))
+
     sign = 0 if final_score == 0 else (1 if final_score > 0 else -1)
     conf = sc.confidence(list(scores.values()), sign)
 
@@ -293,6 +313,7 @@ def score_signal(
                 "components": sentiment.component_scores if sentiment else {},
                 "freshness_s": sentiment.data_freshness_seconds if sentiment else None,
             } if sentiment else None,
+            **quality,
         },
     )
 

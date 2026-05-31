@@ -20,7 +20,7 @@ from typing import Any, Literal
 import pandas as pd
 from loguru import logger
 
-from config import INDICATOR_WEIGHTS_WITHIN_LAYER, MIN_SIGNAL_SCORE, WEIGHTS_BY_REGIME
+from config import INDICATOR_WEIGHTS_WITHIN_LAYER, MIN_SIGNAL_SCORE, WEIGHTS_BY_REGIME, settings
 from core import _scoring as sc
 from core.market_regime import MarketRegimeDetector, Regime
 from core.sentiment_engine import SentimentEngine, SentimentScore
@@ -56,6 +56,29 @@ def _ohlcv_to_df(rows: list[list[float]]) -> pd.DataFrame:
     df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
     df = df.set_index("ts")
     return df.astype({"open": float, "high": float, "low": float, "close": float, "volume": float})
+
+
+def aggregate_layers(
+    layer_scores: dict[str, int],
+    regime_weights: dict[str, float],
+    mode: str = "weighted",
+    active_threshold: int = 20,
+) -> int:
+    """Combine per-layer scores into a final -100..+100 score.
+
+    weighted   — regime-weighted average (legacy; dilutive).
+    confluence — same weighted base, dampened by cross-family DIRECTIONAL CONSENSUS so
+                 conflicting layers (chop) collapse toward 0 while aligned layers are
+                 preserved. Within-layer redundancy is already handled by per-layer averaging.
+    """
+    base = sum(layer_scores.get(k, 0) * w for k, w in regime_weights.items())
+    if mode == "confluence":
+        bull = sum(w for k, w in regime_weights.items() if layer_scores.get(k, 0) >= active_threshold)
+        bear = sum(w for k, w in regime_weights.items() if layer_scores.get(k, 0) <= -active_threshold)
+        active = bull + bear
+        consensus = (bull - bear) / active if active > 0 else 0.0
+        base = base * abs(consensus)
+    return int(round(max(-100, min(100, base))))
 
 
 def score_signal(
@@ -189,10 +212,9 @@ def score_signal(
         layer_scores[layer_name] = int(round(total))
     layer_scores["sentiment"] = int(round(sentiment.composite_score)) if sentiment else 0
 
-    # ─── Regime-weighted final score ────────────────────────
+    # ─── Regime-weighted final score (aggregation mode is a runtime toggle) ──
     regime_weights = WEIGHTS_BY_REGIME[regime.value]
-    final = sum(layer_scores[k] * regime_weights[k] for k in regime_weights)
-    final_score = int(round(max(-100, min(100, final))))
+    final_score = aggregate_layers(layer_scores, regime_weights, settings.aggregation_mode)
 
     sign = 0 if final_score == 0 else (1 if final_score > 0 else -1)
     conf = sc.confidence(list(scores.values()), sign)

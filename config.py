@@ -54,6 +54,10 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # Signal aggregation: "weighted" (legacy regime-weighted average) or "confluence"
+    # (dampen conflicting layers via cross-family consensus). Default off = weighted.
+    aggregation_mode: str = "weighted"
+
 
 settings = Settings()
 

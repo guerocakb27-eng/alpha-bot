@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     mtf_enabled: bool = False
     # Divergence: nudge the score on price/oscillator divergence (RSI/MACD/OBV). Default off.
     divergence_enabled: bool = False
+    # Phase C4 quality filters — each default off, each independently revertible:
+    #   volume gate dampens low-volume breakouts, freshness decays stale crosses,
+    #   structure filter nudges toward HH/HL (up) vs LH/LL (down) market structure.
+    volume_gate_enabled: bool = False
+    freshness_enabled: bool = False
+    structure_filter_enabled: bool = False
 
 
 settings = Settings()
@@ -102,12 +108,12 @@ INDICATOR_WEIGHTS_WITHIN_LAYER: dict[str, dict[str, float]] = {
         "tsi":         0.10,
         "ult_osc":     0.05,
     },
+    # bb_width/atr_regime/bb_squeeze were always-0 (directionless) — removed in C4.
+    # Live weights now sum to 0.60; renormalizing to 1.0 is a tuned change deferred
+    # until it can be backtested (no network), per the Phase C "revert if worse" gate.
     "volatility": {
         "bb_percent_b": 0.30,
-        "bb_width":     0.15,
         "keltner":      0.15,
-        "atr_regime":   0.15,
-        "bb_squeeze":   0.10,
         "donchian":     0.15,
     },
     "volume": {

@@ -131,9 +131,9 @@ class BotLoop:
                 logger.warning("analyze({}) failed: {}", symbol, e)
                 continue
 
-        # Heartbeat for the dead-man's switch: a non-empty result set => we reached the exchange.
-        if results:
-            self.execution_engine.mark_contact()
+        # (Dead-man's-switch heartbeat is NOT refreshed here: analyze() uses the PUBLIC
+        # fetch_ohlcv, and public reachability must not keep the switch alive while
+        # authenticated access is down. The heartbeat comes only from authenticated calls.)
 
         # 2. Persist signals + broadcast
         for symbol, result in results:
@@ -207,10 +207,12 @@ class BotLoop:
             logger.warning("reconcile failed: {}", e)
         deadman = self.execution_engine.deadman_check()
         if deadman != "OK":
-            logger.critical("DEAD-MAN'S SWITCH ({}): exchange contact lost", deadman)
+            logger.critical("DEAD-MAN'S SWITCH ({}): authenticated exchange contact lost", deadman)
             if deadman == "FLATTEN":
                 try:
-                    logger.critical("Dead-man flatten: closed {}", self.execution_engine.flatten_all(current_prices))
+                    res = self.execution_engine.flatten_all(current_prices)
+                    logger.critical("Dead-man flatten: closed={} FAILED={} blocked={}",
+                                    res["closed"], res["failed"], res["blocked"])
                 except Exception as e:
                     logger.error("flatten_all failed: {}", e)
 

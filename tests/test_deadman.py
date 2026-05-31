@@ -61,3 +61,22 @@ def test_mark_contact_updates_timestamp():
     eng.last_exchange_contact = 0
     eng.mark_contact()
     assert eng.last_exchange_contact > 0
+
+
+def test_startup_is_stale_until_authenticated_contact():
+    # Fail-safe: a freshly constructed live engine has had no authenticated contact yet,
+    # so the switch must NOT report OK until mark_contact() is called from a real success.
+    eng = ExecutionEngine(FakeExchange(), paper=False)
+    assert eng.last_exchange_contact == 0.0
+    assert eng.deadman_check() == "ALERT"
+    eng.mark_contact()
+    assert eng.deadman_check() == "OK"
+
+
+def test_flatten_all_blocked_in_live_when_kill_switch_off():
+    settings.enable_live_trading = False  # safe default
+    eng = ExecutionEngine(FakeExchange(), paper=False)
+    eng._validated = True
+    res = eng.flatten_all({})
+    assert res["blocked"] is True
+    assert res["closed"] == []

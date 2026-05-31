@@ -22,6 +22,7 @@ from loguru import logger
 
 from config import INDICATOR_WEIGHTS_WITHIN_LAYER, MIN_SIGNAL_SCORE, WEIGHTS_BY_REGIME, settings
 from core import _scoring as sc
+from core.divergence import detect_divergence
 from core.market_regime import MarketRegimeDetector, Regime
 from core.multi_timeframe import TF_RULE, higher_timeframes, mtf_consensus, resample_ohlcv
 from core.sentiment_engine import SentimentEngine, SentimentScore
@@ -102,6 +103,20 @@ def _confirm_mtf(df: pd.DataFrame, base_tf: str, base_final: int, min_score: int
         tf_scores[htf] = hres.final_score
         tf_weights[htf] = 2.0 + i
     return mtf_consensus(tf_scores, tf_weights)
+
+
+def _divergence_score(df: pd.DataFrame) -> int:
+    """Mean regular/hidden divergence across RSI, MACD histogram, and OBV (Phase C3)."""
+    close = df["close"]
+    rsi = momentum.rsi(df, [14])[14]
+    macd_hist = momentum.macd(df)["histogram"]
+    obv = volume.obv(df)
+    vals = [
+        detect_divergence(close, rsi),
+        detect_divergence(close, macd_hist),
+        detect_divergence(close, obv),
+    ]
+    return int(round(sum(vals) / len(vals)))
 
 
 def score_signal(
@@ -241,6 +256,11 @@ def score_signal(
     final_score = aggregate_layers(layer_scores, regime_weights, settings.aggregation_mode)
     if (settings.mtf_enabled if mtf is None else mtf):
         final_score = _confirm_mtf(df, timeframe, final_score, min_score)
+    if settings.divergence_enabled:
+        div = _divergence_score(df)
+        scores["divergence"] = div   # observability; only nudges the score when a divergence is present
+        if div != 0:
+            final_score = int(round(max(-100, min(100, 0.7 * final_score + 0.3 * div))))
 
     sign = 0 if final_score == 0 else (1 if final_score > 0 else -1)
     conf = sc.confidence(list(scores.values()), sign)

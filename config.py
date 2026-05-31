@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     aggregation_mode: str = "weighted"
     # Multi-timeframe confirmation: gate the signal by higher-TF agreement. Default off.
     mtf_enabled: bool = False
+    # Divergence: nudge the score on price/oscillator divergence (RSI/MACD/OBV). Default off.
+    divergence_enabled: bool = False
 
 
 settings = Settings()

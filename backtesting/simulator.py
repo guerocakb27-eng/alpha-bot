@@ -21,6 +21,10 @@ from datetime import datetime
 import pandas as pd
 
 from backtesting.metrics import max_drawdown, profit_factor, sharpe_ratio, sortino_ratio, win_rate
+from config import settings
+from core.exit_manager import ExitConfig, chandelier_stop, current_r, time_exit_due
+
+_EXIT_CFG = ExitConfig()
 
 
 @dataclass
@@ -46,6 +50,10 @@ class Trade:
     sl: float = 0.0
     tp: float = 0.0
     exit_reason: str = ""
+    # Phase C6 exit-management bookkeeping (only consulted when the flag is on).
+    peak: float = 0.0         # favorable extreme since entry (high for BUY, low for SELL)
+    bars_held: int = 0
+    entry_atr: float = 0.0
 
 
 @dataclass
@@ -95,6 +103,19 @@ def simulate(
     for bar in bars:
         # 1) Manage an existing position on THIS bar (it was opened on an earlier bar).
         if open_trade is not None:
+            # Phase C6 exit management (default off): track the favorable extreme and
+            # ratchet a Chandelier trailing stop once in profit, before the SL/TP check.
+            open_trade.bars_held += 1
+            open_trade.peak = (max(open_trade.peak, bar.high) if open_trade.side == "BUY"
+                               else min(open_trade.peak, bar.low))
+            _d = 1 if open_trade.side == "BUY" else -1
+            _on = settings.exit_management_enabled and open_trade.entry_atr > 0
+            _r = current_r(open_trade.entry, bar.close, open_trade.entry_atr, sl_atr_mult, _d) if _on else 0.0
+            if _on and _r >= _EXIT_CFG.scale_out_r:
+                _ch = chandelier_stop(open_trade.peak, open_trade.entry_atr, _d, _EXIT_CFG.chandelier_mult)
+                if (_ch - open_trade.sl) * _d > 0:   # ratchet only in our favor
+                    open_trade.sl = _ch
+
             exit_px: float | None = None
             reason = ""
             if open_trade.side == "BUY":
@@ -113,6 +134,10 @@ def simulate(
                 )
                 if opposite:
                     exit_px, reason = bar.open, "OPP"
+            # time-based stale exit (default off): dead money after N bars with no progress
+            if exit_px is None and _on and time_exit_due(
+                    open_trade.bars_held, _r, max_bars=_EXIT_CFG.time_exit_bars, min_r=_EXIT_CFG.time_exit_min_r):
+                exit_px, reason = bar.close, "TIME"
             if exit_px is not None:
                 fill = _slip(exit_px, open_trade.side, slippage, is_exit=True)
                 open_trade.exit = fill
@@ -131,7 +156,8 @@ def simulate(
                 sl, tp = entry - sl_atr_mult * bar.atr, entry + tp_atr_mult * bar.atr
             else:
                 sl, tp = entry + sl_atr_mult * bar.atr, entry - tp_atr_mult * bar.atr
-            open_trade = Trade(entry_time=bar.ts, side=side, entry=entry, sl=sl, tp=tp)
+            open_trade = Trade(entry_time=bar.ts, side=side, entry=entry, sl=sl, tp=tp,
+                               peak=entry, entry_atr=bar.atr)
 
         equity_vals.append(equity)
 

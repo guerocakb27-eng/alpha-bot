@@ -21,6 +21,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from config import INDICATOR_WEIGHTS_WITHIN_LAYER, PROJECT_ROOT, WEIGHTS_BY_REGIME, settings
+from core.drift import DriftConfig, detect_drift, rollback_target
 from core.significance import significant_direction
 from database.models import (
     EventSeverity,
@@ -309,6 +310,36 @@ class LearningEngine:
             return 0.0
         rets = np.array([t.pnl_pct for t in trades])
         return float(rets.mean() / rets.std()) if rets.std() != 0 else 0.0
+
+    # ─── D3 Concept-drift detection ─────────────────────────────────────
+    def check_drift(self, baseline_wr: float, window: int = 50,
+                    cfg: DriftConfig | None = None) -> dict[str, Any] | None:
+        """Compare the recent live win rate against the baseline the active weights were
+        accepted at; alert (and surface a rollback target) when it drifts materially
+        below. No-op unless settings.drift_detection_enabled. Pure decision in core.drift;
+        this is just the DB shell + alert dispatch."""
+        if not settings.drift_detection_enabled:
+            return None
+        cfg = cfg or DriftConfig()
+        with SessionLocal() as db:
+            trades = list(db.scalars(
+                select(Trade).where(Trade.status == TradeStatus.CLOSED)
+                .order_by(desc(Trade.exit_time)).limit(window)
+            ))
+            n = len(trades)
+            live_wr = (sum(1 for t in trades if t.pnl_usdt > 0) / n) if n else 0.0
+            report = detect_drift(live_wr, baseline_wr, n, cfg=cfg)
+            target = None
+            if report.drifted:
+                rows = list(db.scalars(
+                    select(IndicatorWeights).order_by(desc(IndicatorWeights.timestamp)).limit(20)
+                ))
+                history = [(w.id, w.performance_score) for w in rows]
+                target = rollback_target(history, current_id=rows[0].id) if rows else None
+                logger.warning("Concept drift: live WR {:.1%} vs baseline {:.1%} (severity {:.2f}); rollback->{}",
+                               live_wr, baseline_wr, report.severity, target)
+        return {"drifted": report.drifted, "live_wr": live_wr, "severity": report.severity,
+                "reason": report.reason, "rollback_to": target}
 
     # ─── L6 Weekly report ───────────────────────────────────────────
     def generate_weekly_report(self) -> Path:

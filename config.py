@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     # Phase D2: route run_optuna through OOS-holdout validation — apply tuned weights
     # only if they hold up on the held-out slice (run_study_oos), not in-sample. Default off.
     oos_validation_enabled: bool = False
+    # Phase D3: detect concept drift — alert (and optionally roll back to last-good
+    # weights) when live win-rate falls materially below its validated baseline. Default off.
+    drift_detection_enabled: bool = False
 
 
 settings = Settings()

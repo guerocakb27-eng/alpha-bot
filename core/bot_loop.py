@@ -21,7 +21,9 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 
+from config import settings
 from core.bot_state import state as bot_state
+from core.decision_log import explain_decision, format_decision
 from core.execution_engine import ExecutionEngine
 from core.learning_engine import LearningEngine
 from core.notifications import notifications
@@ -164,18 +166,25 @@ class BotLoop:
         # For trade-gating we re-derive the label from the live DB threshold so users
         # can lower min_signal_score and immediately see trades fire.
         for symbol, result in results:
+            with SessionLocal() as db:
+                has_position = db.scalars(
+                    select(Trade).where(Trade.symbol == symbol, Trade.status == TradeStatus.OPEN)
+                ).first() is not None
+            close = result.extras.get("close")
+            atr = result.extras.get("atr_14")
+
+            # E1: build the WHY chain once (mirrors the gating order below) and log it.
+            if settings.decision_logging_enabled:
+                logger.info("DECISION {}", format_decision(
+                    explain_decision(result, min_score=min_score, has_position=has_position,
+                                     close=close, atr=atr)))
+
             if abs(result.final_score) < min_score:
                 continue
             if result.signal == "NEUTRAL":
                 result.signal = "BUY" if result.final_score > 0 else "SELL"
-            with SessionLocal() as db:
-                already_open = db.scalars(
-                    select(Trade).where(Trade.symbol == symbol, Trade.status == TradeStatus.OPEN)
-                ).first()
-            if already_open:
+            if has_position:
                 continue
-            close = result.extras.get("close")
-            atr = result.extras.get("atr_14")
             if not close or not atr:
                 continue
             trade = await self.execution_engine.execute_signal(result, close, atr)

@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # Phase D3: detect concept drift — alert (and optionally roll back to last-good
     # weights) when live win-rate falls materially below its validated baseline. Default off.
     drift_detection_enabled: bool = False
+    # Phase E1: log a per-signal WHY chain (verdict + gating reason + top drivers) for
+    # every trade/skip decision, for the dashboard's "why did the bot do this" panel. Off.
+    decision_logging_enabled: bool = False
 
 
 settings = Settings()

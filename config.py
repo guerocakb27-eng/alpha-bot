@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     vol_sizing_enabled: bool = False
     kelly_sizing_enabled: bool = False
     correlation_cap_enabled: bool = False
+    # Phase D1: gate indicator-weight nudges behind a proportion z-test so a single
+    # win/loss can't move weights — only a significant, established edge does. Default off.
+    significance_gate_enabled: bool = False
 
 
 settings = Settings()

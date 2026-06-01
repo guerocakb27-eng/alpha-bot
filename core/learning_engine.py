@@ -20,7 +20,8 @@ from loguru import logger
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from config import INDICATOR_WEIGHTS_WITHIN_LAYER, PROJECT_ROOT, WEIGHTS_BY_REGIME
+from config import INDICATOR_WEIGHTS_WITHIN_LAYER, PROJECT_ROOT, WEIGHTS_BY_REGIME, settings
+from core.significance import significant_direction
 from database.models import (
     EventSeverity,
     EventType,
@@ -37,6 +38,11 @@ from database.repository import log_event
 ATTRIBUTION_NUDGE = 0.003          # 0.3% per trade
 WEIGHT_FLOOR_MULT = 0.5
 WEIGHT_CEIL_MULT = 1.5
+
+# D1 significance gate — only nudge an indicator once its win rate is statistically
+# distinguishable from chance over a minimum sample (suppresses single-trade noise).
+SIGNIFICANCE_MIN_SAMPLE = 30
+SIGNIFICANCE_Z = 1.96              # ~95% two-sided
 
 ADAPTIVE_WINDOW = 20
 MIN_THRESHOLD = 50
@@ -89,6 +95,9 @@ class LearningEngine:
             for layer, weights in INDICATOR_WEIGHTS_WITHIN_LAYER.items()
         }
         self._trades_since_optuna = 0
+        # D1: per-indicator (wins, total) tallies so the significance gate can judge an
+        # established edge instead of reacting to the latest single trade.
+        self._indicator_tally: dict[str, list[int]] = {}
 
     # ─── L1 Attribution ─────────────────────────────────────────────
     def on_trade_closed(self, trade: Trade) -> None:
@@ -116,7 +125,8 @@ class LearningEngine:
         )[:3]
 
         won = _trade_returned(trade)
-        direction = +1 if won else -1
+        gated = settings.significance_gate_enabled
+        nudged: list[str] = []
         for name, _ in contributions:
             layer = _layer_of_indicator(name)
             if not layer:
@@ -125,15 +135,28 @@ class LearningEngine:
             baseline = self._baseline_indicator_layer_weights[layer].get(name)
             if current is None or baseline is None:
                 continue
+            # D1: accumulate this indicator's outcome and let the significance gate pick
+            # the nudge direction from the ESTABLISHED edge; otherwise (gate off) keep the
+            # legacy per-trade +1 win / -1 loss behavior.
+            tally = self._indicator_tally.setdefault(name, [0, 0])
+            tally[0] += int(won)
+            tally[1] += 1
+            if gated:
+                direction = significant_direction(
+                    tally[0], tally[1],
+                    min_sample=SIGNIFICANCE_MIN_SAMPLE, z_threshold=SIGNIFICANCE_Z,
+                )
+                if direction == 0:
+                    continue   # not enough evidence yet — hold the weight
+            else:
+                direction = +1 if won else -1
             new_w = current * (1 + ATTRIBUTION_NUDGE * direction)
             new_w = max(baseline * WEIGHT_FLOOR_MULT, min(baseline * WEIGHT_CEIL_MULT, new_w))
             self._indicator_layer_weights[layer][name] = new_w
+            nudged.append(name)
 
-        # Renormalize within each affected layer
-        for name, _ in contributions:
-            layer = _layer_of_indicator(name)
-            if not layer:
-                continue
+        # Renormalize only the layers actually nudged (gate-held trades change nothing)
+        for layer in {_layer_of_indicator(n) for n in nudged} - {None}:
             total = sum(self._indicator_layer_weights[layer].values())
             if total > 0:
                 self._indicator_layer_weights[layer] = {

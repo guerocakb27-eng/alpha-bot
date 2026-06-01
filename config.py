@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # Phase D1: gate indicator-weight nudges behind a proportion z-test so a single
     # win/loss can't move weights — only a significant, established edge does. Default off.
     significance_gate_enabled: bool = False
+    # Phase D2: route run_optuna through OOS-holdout validation — apply tuned weights
+    # only if they hold up on the held-out slice (run_study_oos), not in-sample. Default off.
+    oos_validation_enabled: bool = False
 
 
 settings = Settings()

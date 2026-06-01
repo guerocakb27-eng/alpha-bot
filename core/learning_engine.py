@@ -252,15 +252,32 @@ class LearningEngine:
                 logger.info("Regime {} RE-ENABLED (win rate {:.1f}%)", regime, wr)
 
     # ─── L3 Optuna (manual / scheduled) ─────────────────────────────
-    def run_optuna(self, signal_engine, backtester, n_trials: int = 100) -> dict[str, Any]:
-        """Wrapper around backtesting.optimizer.run_study."""
-        from backtesting.optimizer import run_study
+    def run_optuna(self, signal_engine, backtester, n_trials: int = 100, full_df=None) -> dict[str, Any]:
+        """Tune regime weights via Optuna and persist them only if they pass the
+        configured trust gate.
+
+        Default (oos_validation_enabled off): legacy in-sample path — accept if Sharpe
+        improves by OPTUNA_MIN_IMPROVEMENT over current. With the flag on (Phase D2) and
+        an OHLCV `full_df`: optimize on the train split and accept ONLY if the tuned
+        weights hold up on the held-out OOS slice (run_study_oos), so an overfit fit that
+        looks great in-sample but collapses out-of-sample is never applied.
+        """
+        use_oos = settings.oos_validation_enabled and full_df is not None
+        if use_oos:
+            from backtesting.optimize_oos import run_study_oos
+            result = run_study_oos(signal_engine, backtester, full_df, n_trials=n_trials)
+        else:
+            from backtesting.optimizer import run_study
+            result = run_study(signal_engine, backtester, n_trials=n_trials)
 
         with SessionLocal() as db:
             current = self._current_sharpe(db)
-            result = run_study(signal_engine, backtester, n_trials=n_trials)
-            new_sharpe = result["best_sharpe"]
-            applied = new_sharpe > current + OPTUNA_MIN_IMPROVEMENT
+            if use_oos:
+                new_sharpe = result["oos_sharpe"]
+                applied = result["accepted"]
+            else:
+                new_sharpe = result["best_sharpe"]
+                applied = new_sharpe > current + OPTUNA_MIN_IMPROVEMENT
 
             if applied:
                 # Persist new layer weights per regime

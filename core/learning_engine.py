@@ -20,7 +20,9 @@ from loguru import logger
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from config import INDICATOR_WEIGHTS_WITHIN_LAYER, PROJECT_ROOT, WEIGHTS_BY_REGIME
+from config import INDICATOR_WEIGHTS_WITHIN_LAYER, PROJECT_ROOT, WEIGHTS_BY_REGIME, settings
+from core.drift import DriftConfig, detect_drift, rollback_target
+from core.significance import significant_direction
 from database.models import (
     EventSeverity,
     EventType,
@@ -37,6 +39,11 @@ from database.repository import log_event
 ATTRIBUTION_NUDGE = 0.003          # 0.3% per trade
 WEIGHT_FLOOR_MULT = 0.5
 WEIGHT_CEIL_MULT = 1.5
+
+# D1 significance gate — only nudge an indicator once its win rate is statistically
+# distinguishable from chance over a minimum sample (suppresses single-trade noise).
+SIGNIFICANCE_MIN_SAMPLE = 30
+SIGNIFICANCE_Z = 1.96              # ~95% two-sided
 
 ADAPTIVE_WINDOW = 20
 MIN_THRESHOLD = 50
@@ -89,6 +96,9 @@ class LearningEngine:
             for layer, weights in INDICATOR_WEIGHTS_WITHIN_LAYER.items()
         }
         self._trades_since_optuna = 0
+        # D1: per-indicator (wins, total) tallies so the significance gate can judge an
+        # established edge instead of reacting to the latest single trade.
+        self._indicator_tally: dict[str, list[int]] = {}
 
     # ─── L1 Attribution ─────────────────────────────────────────────
     def on_trade_closed(self, trade: Trade) -> None:
@@ -116,7 +126,8 @@ class LearningEngine:
         )[:3]
 
         won = _trade_returned(trade)
-        direction = +1 if won else -1
+        gated = settings.significance_gate_enabled
+        nudged: list[str] = []
         for name, _ in contributions:
             layer = _layer_of_indicator(name)
             if not layer:
@@ -125,15 +136,28 @@ class LearningEngine:
             baseline = self._baseline_indicator_layer_weights[layer].get(name)
             if current is None or baseline is None:
                 continue
+            # D1: accumulate this indicator's outcome and let the significance gate pick
+            # the nudge direction from the ESTABLISHED edge; otherwise (gate off) keep the
+            # legacy per-trade +1 win / -1 loss behavior.
+            tally = self._indicator_tally.setdefault(name, [0, 0])
+            tally[0] += int(won)
+            tally[1] += 1
+            if gated:
+                direction = significant_direction(
+                    tally[0], tally[1],
+                    min_sample=SIGNIFICANCE_MIN_SAMPLE, z_threshold=SIGNIFICANCE_Z,
+                )
+                if direction == 0:
+                    continue   # not enough evidence yet — hold the weight
+            else:
+                direction = +1 if won else -1
             new_w = current * (1 + ATTRIBUTION_NUDGE * direction)
             new_w = max(baseline * WEIGHT_FLOOR_MULT, min(baseline * WEIGHT_CEIL_MULT, new_w))
             self._indicator_layer_weights[layer][name] = new_w
+            nudged.append(name)
 
-        # Renormalize within each affected layer
-        for name, _ in contributions:
-            layer = _layer_of_indicator(name)
-            if not layer:
-                continue
+        # Renormalize only the layers actually nudged (gate-held trades change nothing)
+        for layer in {_layer_of_indicator(n) for n in nudged} - {None}:
             total = sum(self._indicator_layer_weights[layer].values())
             if total > 0:
                 self._indicator_layer_weights[layer] = {
@@ -229,15 +253,32 @@ class LearningEngine:
                 logger.info("Regime {} RE-ENABLED (win rate {:.1f}%)", regime, wr)
 
     # ─── L3 Optuna (manual / scheduled) ─────────────────────────────
-    def run_optuna(self, signal_engine, backtester, n_trials: int = 100) -> dict[str, Any]:
-        """Wrapper around backtesting.optimizer.run_study."""
-        from backtesting.optimizer import run_study
+    def run_optuna(self, signal_engine, backtester, n_trials: int = 100, full_df=None) -> dict[str, Any]:
+        """Tune regime weights via Optuna and persist them only if they pass the
+        configured trust gate.
+
+        Default (oos_validation_enabled off): legacy in-sample path — accept if Sharpe
+        improves by OPTUNA_MIN_IMPROVEMENT over current. With the flag on (Phase D2) and
+        an OHLCV `full_df`: optimize on the train split and accept ONLY if the tuned
+        weights hold up on the held-out OOS slice (run_study_oos), so an overfit fit that
+        looks great in-sample but collapses out-of-sample is never applied.
+        """
+        use_oos = settings.oos_validation_enabled and full_df is not None
+        if use_oos:
+            from backtesting.optimize_oos import run_study_oos
+            result = run_study_oos(signal_engine, backtester, full_df, n_trials=n_trials)
+        else:
+            from backtesting.optimizer import run_study
+            result = run_study(signal_engine, backtester, n_trials=n_trials)
 
         with SessionLocal() as db:
             current = self._current_sharpe(db)
-            result = run_study(signal_engine, backtester, n_trials=n_trials)
-            new_sharpe = result["best_sharpe"]
-            applied = new_sharpe > current + OPTUNA_MIN_IMPROVEMENT
+            if use_oos:
+                new_sharpe = result["oos_sharpe"]
+                applied = result["accepted"]
+            else:
+                new_sharpe = result["best_sharpe"]
+                applied = new_sharpe > current + OPTUNA_MIN_IMPROVEMENT
 
             if applied:
                 # Persist new layer weights per regime
@@ -269,6 +310,36 @@ class LearningEngine:
             return 0.0
         rets = np.array([t.pnl_pct for t in trades])
         return float(rets.mean() / rets.std()) if rets.std() != 0 else 0.0
+
+    # ─── D3 Concept-drift detection ─────────────────────────────────────
+    def check_drift(self, baseline_wr: float, window: int = 50,
+                    cfg: DriftConfig | None = None) -> dict[str, Any] | None:
+        """Compare the recent live win rate against the baseline the active weights were
+        accepted at; alert (and surface a rollback target) when it drifts materially
+        below. No-op unless settings.drift_detection_enabled. Pure decision in core.drift;
+        this is just the DB shell + alert dispatch."""
+        if not settings.drift_detection_enabled:
+            return None
+        cfg = cfg or DriftConfig()
+        with SessionLocal() as db:
+            trades = list(db.scalars(
+                select(Trade).where(Trade.status == TradeStatus.CLOSED)
+                .order_by(desc(Trade.exit_time)).limit(window)
+            ))
+            n = len(trades)
+            live_wr = (sum(1 for t in trades if t.pnl_usdt > 0) / n) if n else 0.0
+            report = detect_drift(live_wr, baseline_wr, n, cfg=cfg)
+            target = None
+            if report.drifted:
+                rows = list(db.scalars(
+                    select(IndicatorWeights).order_by(desc(IndicatorWeights.timestamp)).limit(20)
+                ))
+                history = [(w.id, w.performance_score) for w in rows]
+                target = rollback_target(history, current_id=rows[0].id) if rows else None
+                logger.warning("Concept drift: live WR {:.1%} vs baseline {:.1%} (severity {:.2f}); rollback->{}",
+                               live_wr, baseline_wr, report.severity, target)
+        return {"drifted": report.drifted, "live_wr": live_wr, "severity": report.severity,
+                "reason": report.reason, "rollback_to": target}
 
     # ─── L6 Weekly report ───────────────────────────────────────────
     def generate_weekly_report(self) -> Path:

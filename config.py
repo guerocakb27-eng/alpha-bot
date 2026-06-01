@@ -73,6 +73,23 @@ class Settings(BaseSettings):
     # Phase C6 exit management (Chandelier trailing + time-based stale exit in the
     # backtester; scale-out/parabolic partials are built+tested but not yet wired). Off.
     exit_management_enabled: bool = False
+    # Phase C7 risk & sizing — each a reduce-only size multiplier, default off:
+    #   vol sizing (inverse-ATR), capped half-Kelly (>=50 trades), correlation cap.
+    vol_sizing_enabled: bool = False
+    kelly_sizing_enabled: bool = False
+    correlation_cap_enabled: bool = False
+    # Phase D1: gate indicator-weight nudges behind a proportion z-test so a single
+    # win/loss can't move weights — only a significant, established edge does. Default off.
+    significance_gate_enabled: bool = False
+    # Phase D2: route run_optuna through OOS-holdout validation — apply tuned weights
+    # only if they hold up on the held-out slice (run_study_oos), not in-sample. Default off.
+    oos_validation_enabled: bool = False
+    # Phase D3: detect concept drift — alert (and optionally roll back to last-good
+    # weights) when live win-rate falls materially below its validated baseline. Default off.
+    drift_detection_enabled: bool = False
+    # Phase E1: log a per-signal WHY chain (verdict + gating reason + top drivers) for
+    # every trade/skip decision, for the dashboard's "why did the bot do this" panel. Off.
+    decision_logging_enabled: bool = False
 
 
 settings = Settings()

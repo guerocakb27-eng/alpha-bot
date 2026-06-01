@@ -14,6 +14,8 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from config import settings
+from core.sizing import correlation_cap, kelly_risk_multiplier, volatility_scalar
 from database.models import Trade, TradeStatus
 
 
@@ -36,6 +38,15 @@ DAY_SOFT_LOSS_PCT = 3.0                  # -3% day  -> open new trades at half s
 DAY_HARD_LOSS_PCT = MAX_DAILY_LOSS_PCT   # -5% day  -> no new trades today
 WEEK_HARD_LOSS_PCT = 10.0                # -10% week -> full stop until manual restart
 
+# Phase C7 sizing defaults (all reduce-only).
+TARGET_ATR_PCT = 2.0                     # vol sizing scales size toward this ATR%
+VOL_SIZING_FLOOR = 0.25
+KELLY_MIN_TRADES = 50                    # no Kelly tilt below this sample size
+KELLY_FLOOR = 0.1
+CORR_THRESHOLD = 0.7                     # |corr| >= this counts as clustered exposure
+CORR_PENALTY = 0.5                       # size *= penalty per correlated open position
+CORR_FLOOR = 0.25
+
 
 @dataclass
 class RiskConfig:
@@ -54,6 +65,13 @@ class RiskConfig:
     day_soft_loss_pct: float = DAY_SOFT_LOSS_PCT
     day_hard_loss_pct: float = DAY_HARD_LOSS_PCT
     week_hard_loss_pct: float = WEEK_HARD_LOSS_PCT
+    target_atr_pct: float = TARGET_ATR_PCT
+    vol_sizing_floor: float = VOL_SIZING_FLOOR
+    kelly_min_trades: int = KELLY_MIN_TRADES
+    kelly_floor: float = KELLY_FLOOR
+    corr_threshold: float = CORR_THRESHOLD
+    corr_penalty: float = CORR_PENALTY
+    corr_floor: float = CORR_FLOOR
 
     @classmethod
     def from_settings(cls, db: Session) -> "RiskConfig":
@@ -225,17 +243,41 @@ class RiskManager:
         return entry + self.cfg.rr_ratio * risk if side == "BUY" else entry - self.cfg.rr_ratio * risk
 
     def build_plan(self, side: str, entry: float, atr: float, balance_usdt: float,
-                   size_multiplier: float = 1.0) -> TradePlan:
+                   size_multiplier: float = 1.0, *,
+                   atr_pct: float | None = None,
+                   kelly: tuple[float, float, int] | None = None,
+                   new_symbol: str | None = None,
+                   open_symbols: list[str] | None = None,
+                   corr_lookup: dict | None = None) -> TradePlan:
         sl = self.stop_loss(side, entry, atr)
         tp = self.take_profit(side, entry, sl)
         qty, notional = self.position_size(balance_usdt, entry, sl)
         qty *= size_multiplier        # circuit-breaker HALVE tier only ever reduces size
         notional *= size_multiplier
+        # Phase C7 reduce-only sizing (each gated by its flag; product is always <= 1.0,
+        # so these can only shrink the trade — never inflate it past base risk).
+        c7 = self._c7_multiplier(atr_pct, kelly, new_symbol, open_symbols, corr_lookup)
+        qty *= c7
+        notional *= c7
         risk = abs(entry - sl) * qty
         return TradePlan(
             side=side, entry=entry, stop_loss=sl, take_profit=tp,
             quantity=qty, size_usdt=notional, risk_usdt=risk, rr_ratio=self.cfg.rr_ratio,
         )
+
+    def _c7_multiplier(self, atr_pct, kelly, new_symbol, open_symbols, corr_lookup) -> float:
+        cfg, m = self.cfg, 1.0
+        if settings.vol_sizing_enabled and atr_pct is not None:
+            m *= volatility_scalar(atr_pct, cfg.target_atr_pct, floor=cfg.vol_sizing_floor)
+        if settings.kelly_sizing_enabled and kelly is not None:
+            win_rate, payoff, n = kelly
+            m *= kelly_risk_multiplier(win_rate, payoff, n, cfg.risk_per_trade_pct / 100,
+                                       min_trades=cfg.kelly_min_trades, floor=cfg.kelly_floor)
+        if settings.correlation_cap_enabled and new_symbol and open_symbols and corr_lookup:
+            m *= correlation_cap(new_symbol, open_symbols, corr_lookup,
+                                 threshold=cfg.corr_threshold, penalty=cfg.corr_penalty,
+                                 floor=cfg.corr_floor)
+        return m
 
     # ─── Trailing stop ────────────────────────────────────────────────
     def update_trailing_stop(self, trade: Trade, current_price: float, atr: float) -> float | None:

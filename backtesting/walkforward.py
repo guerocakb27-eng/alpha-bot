@@ -15,6 +15,22 @@ from backtesting.simulator import BacktestResult
 MIN_SIDE = 10  # need at least this many decided bars on each side to be meaningful
 
 
+def oos_accept(in_sample_sharpe: float, oos_sharpe: float, *,
+               accept_ratio: float = 0.5, min_oos_sharpe: float = 0.0) -> bool:
+    """Accept tuned params only if they HOLD UP out-of-sample (Phase D2).
+
+    Two conditions, both required:
+      * OOS Sharpe strictly clears an absolute floor (default 0) — it must actually work
+        on unseen bars, regardless of in-sample;
+      * OOS retains at least `accept_ratio` of the in-sample Sharpe — guards against an
+        overfit fit that looks great in-sample and collapses out-of-sample.
+    A negative in-sample makes the retention test vacuous, so the floor alone decides.
+    """
+    if oos_sharpe <= min_oos_sharpe:
+        return False
+    return oos_sharpe >= accept_ratio * in_sample_sharpe
+
+
 def oos_split(full_df: pd.DataFrame, train_frac: float = 0.7, warmup: int = 250) -> tuple[pd.DataFrame, pd.DataFrame]:
     if not 0.0 < train_frac < 1.0:
         raise ValueError(f"train_frac must be in (0,1), got {train_frac}")

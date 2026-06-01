@@ -17,7 +17,7 @@ import numpy as np
 import optuna
 from loguru import logger
 
-from backtesting.walkforward import oos_split
+from backtesting.walkforward import oos_accept, oos_split
 from config import WEIGHTS_BY_REGIME
 
 LAYERS = ["trend", "momentum", "volatility", "volume", "pattern", "sentiment"]
@@ -103,7 +103,7 @@ def run_study_oos(
         for r, w in snapshot.items():
             WEIGHTS_BY_REGIME[r] = w
 
-    accepted = oos_sharpe > 0 and oos_sharpe >= oos_accept_ratio * in_sample_sharpe
+    accepted = oos_accept(in_sample_sharpe, oos_sharpe, accept_ratio=oos_accept_ratio)
     return {
         "best_params": best.params,
         "best_weights": best_weights,

@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     # Phase C6 exit management (Chandelier trailing + time-based stale exit in the
     # backtester; scale-out/parabolic partials are built+tested but not yet wired). Off.
     exit_management_enabled: bool = False
+    # Phase C7 risk & sizing — each a reduce-only size multiplier, default off:
+    #   vol sizing (inverse-ATR), capped half-Kelly (>=50 trades), correlation cap.
+    vol_sizing_enabled: bool = False
+    kelly_sizing_enabled: bool = False
+    correlation_cap_enabled: bool = False
 
 
 settings = Settings()

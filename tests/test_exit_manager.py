@@ -8,9 +8,7 @@ deferred while offline — these tests pin mechanics only.
 from __future__ import annotations
 
 import warnings
-
-import numpy as np
-import pandas as pd
+from datetime import datetime, timedelta
 
 from config import settings
 from core.exit_manager import (
@@ -114,34 +112,40 @@ def test_short_side_scale_out():
     assert d.close_fraction == CFG.scale_out_fraction and d.new_stop == 100.0
 
 
-# ─── simulator integration (default-off; trailing + time-exit wired) ─────
-def _trend_df(n: int = 80) -> pd.DataFrame:
-    close = np.linspace(100, 140, n)
-    return pd.DataFrame(
-        {"open": close, "high": close * 1.002, "low": close * 0.998,
-         "close": close, "volume": np.full(n, 500.0)},
-        index=pd.date_range("2024-01-01", periods=n, freq="h"),
-    )
+# ─── simulator integration (real list[Bar] API; trailing + time-exit) ────
+def _bars(closes, *, atr=2.0, entry_signal="BUY", score=80):
+    """One BUY at bar0, then NEUTRAL; flat OHLC per close (high=low=close)."""
+    from backtesting.simulator import Bar
+    t0 = datetime(2024, 1, 1)
+    return [
+        Bar(ts=t0 + timedelta(hours=i), open=c, high=c, low=c, close=c,
+            signal=entry_signal if i == 0 else "NEUTRAL", score=score, atr=atr)
+        for i, c in enumerate(closes)
+    ]
 
 
-def test_simulator_off_path_unchanged(monkeypatch):
+# TP far away (tp_atr_mult=50) so only stops/exits decide the outcome.
+def test_off_path_no_exit_when_fixed_stop_untouched(monkeypatch):
     from backtesting.simulator import simulate
-    df = _trend_df()
-    sig = pd.Series([60] * len(df), index=df.index)
-    atr = pd.Series(np.full(len(df), 1.0), index=df.index)
     monkeypatch.setattr(settings, "exit_management_enabled", False)
-    a = simulate(sig, df, atr=atr)
-    b = simulate(sig, df, atr=atr)
-    assert (a.trades, a.total_return) == (b.trades, b.total_return)
+    bars = _bars([100, 105, 110, 120, 130, 125, 120, 115])   # rally then mild pullback
+    res = simulate(bars, min_score=50, sl_atr_mult=1.5, tp_atr_mult=50.0)
+    assert res.trade_log == []   # fixed SL=97 never hit, TP=200 never hit -> stays open
 
 
-def test_simulator_trailing_keeps_results_bounded(monkeypatch):
+def test_trailing_locks_in_profit(monkeypatch):
     from backtesting.simulator import simulate
-    df = _trend_df()
-    sig = pd.Series([60] * len(df), index=df.index)
-    atr = pd.Series(np.full(len(df), 1.0), index=df.index)
     monkeypatch.setattr(settings, "exit_management_enabled", True)
-    res = simulate(sig, df, atr=atr)
-    assert res.total_return >= -1.0          # bounded, no blow-up
-    assert all(t["reason"] in {"stop", "take_profit", "signal_flip", "time_exit"}
-               for t in res.trade_log)
+    bars = _bars([100, 105, 110, 120, 130, 125, 120, 115])   # same path
+    res = simulate(bars, min_score=50, sl_atr_mult=1.5, tp_atr_mult=50.0)
+    assert len(res.trade_log) == 1
+    assert res.trade_log[0].exit_reason == "SL"   # the *trailed* stop
+    assert res.trade_log[0].pnl > 0               # locked in gains the fixed stop wouldn't
+
+
+def test_time_exit_closes_stale_trade(monkeypatch):
+    from backtesting.simulator import simulate
+    monkeypatch.setattr(settings, "exit_management_enabled", True)
+    bars = _bars([100] * 60)   # enter then go nowhere
+    res = simulate(bars, min_score=50, sl_atr_mult=1.5, tp_atr_mult=50.0)
+    assert len(res.trade_log) == 1 and res.trade_log[0].exit_reason == "TIME"

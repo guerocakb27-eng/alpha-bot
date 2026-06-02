@@ -1,7 +1,8 @@
-import { BarChart3, HelpCircle, Layers, ListChecks, Radio, Settings as SettingsIcon } from "lucide-react";
+import { BarChart3, Grid3x3, HelpCircle, Layers, ListChecks, Radio, Settings as SettingsIcon } from "lucide-react";
 import { useState } from "react";
 import AttributionTab from "./components/AttributionTab";
 import DecisionsTab from "./components/DecisionsTab";
+import HeatmapTab from "./components/HeatmapTab";
 import Header from "./components/Header";
 import PerformanceTab from "./components/PerformanceTab";
 import SettingsTab from "./components/SettingsTab";
@@ -11,6 +12,7 @@ import { useWebSocket } from "./hooks/useWebSocket";
 
 const TABS = [
   { id: "signals", label: "Signals", icon: Radio },
+  { id: "heatmap", label: "Heatmap", icon: Grid3x3 },
   { id: "decisions", label: "Why", icon: HelpCircle },
   { id: "trades", label: "Trades", icon: ListChecks },
   { id: "performance", label: "Performance", icon: BarChart3 },
@@ -43,6 +45,7 @@ export default function App() {
 
       <main className="flex-1">
         {tab === "signals" && <SignalsTab wsEvent={lastEvent} />}
+        {tab === "heatmap" && <HeatmapTab />}
         {tab === "decisions" && <DecisionsTab />}
         {tab === "trades" && <TradesTab />}
         {tab === "performance" && <PerformanceTab />}

@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from core.heatmap import build_indicator_heatmap
 from database import repository
 from database.models import get_db
 
@@ -32,6 +33,13 @@ def _serialize(s) -> dict:
 def list_signals(db: Session = Depends(get_db)) -> dict:
     rows = repository.latest_signal_per_symbol(db)
     return {"signals": [_serialize(s) for s in rows]}
+
+
+# NOTE: declared before /{symbol:path} so the literal path isn't captured as a symbol.
+@router.get("/heatmap")
+def heatmap(db: Session = Depends(get_db)) -> dict:
+    """Symbol×indicator score matrix (latest signal per symbol) for the heatmap tab."""
+    return build_indicator_heatmap(repository.latest_signal_per_symbol(db))
 
 
 @router.get("/{symbol:path}")

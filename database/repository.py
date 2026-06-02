@@ -195,3 +195,25 @@ def log_event(
     db.commit()
     db.refresh(ev)
     return ev
+
+
+def log_decision(db: Session, record: Any) -> BotEvent:
+    """Persist a Phase E1 DecisionRecord as a DECISION BotEvent (the 'why' panel's data source)."""
+    from core.decision_log import format_decision, to_metadata
+    return log_event(db, EventType.DECISION, format_decision(record),
+                     EventSeverity.INFO, event_metadata=to_metadata(record))
+
+
+def recent_decisions(db: Session, limit: int = 50) -> list[dict[str, Any]]:
+    """Most-recent decision records, newest first, flattened for the dashboard."""
+    rows = db.scalars(
+        select(BotEvent)
+        .where(BotEvent.event_type == EventType.DECISION)
+        .order_by(desc(BotEvent.timestamp))
+        .limit(limit)
+    ).all()
+    return [
+        {"id": r.id, "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+         "message": r.message, **(r.event_metadata or {})}
+        for r in rows
+    ]

@@ -75,3 +75,14 @@ def format_decision(d: DecisionRecord) -> str:
     inds = ", ".join(f"{n}:{v:+d}" for n, v in d.top_indicators) or "—"
     return (f"[{d.symbol} {d.timeframe}] {verdict} | score={d.final_score:+d} "
             f"conf={d.confidence} regime={d.regime} | layers: {layers} | drivers: {inds}")
+
+
+def to_metadata(d: DecisionRecord) -> dict:
+    """JSON-safe record for BotEvent.event_metadata (Phase E3 'why' panel reads this back)."""
+    return {
+        "symbol": d.symbol, "timeframe": d.timeframe, "final_score": d.final_score,
+        "signal": d.signal, "confidence": d.confidence, "regime": d.regime,
+        "traded": d.traded, "reason": d.reason.value,
+        "top_layers": [[n, v] for n, v in d.top_layers],
+        "top_indicators": [[n, v] for n, v in d.top_indicators],
+    }

@@ -173,11 +173,14 @@ class BotLoop:
             close = result.extras.get("close")
             atr = result.extras.get("atr_14")
 
-            # E1: build the WHY chain once (mirrors the gating order below) and log it.
+            # E1: build the WHY chain once (mirrors the gating order below); log it (E1)
+            # and persist it (E3) so the dashboard 'why' panel can read decision history.
             if settings.decision_logging_enabled:
-                logger.info("DECISION {}", format_decision(
-                    explain_decision(result, min_score=min_score, has_position=has_position,
-                                     close=close, atr=atr)))
+                decision = explain_decision(result, min_score=min_score, has_position=has_position,
+                                            close=close, atr=atr)
+                logger.info("DECISION {}", format_decision(decision))
+                with SessionLocal() as db:
+                    repository.log_decision(db, decision)
 
             if abs(result.final_score) < min_score:
                 continue

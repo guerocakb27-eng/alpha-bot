@@ -2,6 +2,7 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxi
 import { useApi } from "../hooks/useApi";
 import EquityChart from "./EquityChart";
 import KpiCard from "./KpiCard";
+import RiskGauge from "./RiskGauge";
 
 export default function PerformanceTab() {
   const { data: summary } = useApi("/api/performance", { pollMs: 30000 });
@@ -13,6 +14,8 @@ export default function PerformanceTab() {
 
   return (
     <div className="p-4 space-y-4">
+      <RiskGauge />
+
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <KpiCard label="Win Rate" value={`${summary?.win_rate ?? 0}%`} color={summary?.win_rate >= 50 ? "text-green" : "text-yellow"} />
         <KpiCard label="Total PnL" value={`$${(summary?.total_pnl_usdt ?? 0).toFixed(2)}`}

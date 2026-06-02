@@ -132,6 +132,38 @@ def circuit_breaker_action(
     return "NORMAL"
 
 
+_ACTION_LABEL = {
+    "NORMAL": "Normal — full size",
+    "HALVE": "Soft breaker — half size",
+    "NO_NEW": "Daily limit — no new trades",
+    "FULL_STOP": "Weekly stop — halted",
+}
+
+
+def risk_posture(
+    day_loss_pct: float,
+    week_loss_pct: float,
+    *,
+    day_soft: float = DAY_SOFT_LOSS_PCT,
+    day_hard: float = DAY_HARD_LOSS_PCT,
+    week_hard: float = WEEK_HARD_LOSS_PCT,
+) -> dict:
+    """Read-only risk snapshot for the dashboard gauge: current day/week PnL%, the
+    active circuit-breaker action, and the (negative) tier thresholds it's measured against.
+    Pure — same tier logic as the live pre-trade breaker, no DB."""
+    action = circuit_breaker_action(
+        day_loss_pct, week_loss_pct, day_soft=day_soft, day_hard=day_hard, week_hard=week_hard)
+    return {
+        "action": action,
+        "label": _ACTION_LABEL[action],
+        "halted": action in ("NO_NEW", "FULL_STOP"),
+        "size_multiplier": 0.5 if action == "HALVE" else 0.0 if action in ("NO_NEW", "FULL_STOP") else 1.0,
+        "day_loss_pct": round(day_loss_pct, 2),
+        "week_loss_pct": round(week_loss_pct, 2),
+        "thresholds": {"day_soft": -day_soft, "day_hard": -day_hard, "week_hard": -week_hard},
+    }
+
+
 class RiskManager:
     """All trade decisions go through here. Stateless — the trailing-stop peak lives on
     the Trade row (peak_r), so it survives a restart. Tunables come from self.cfg."""
@@ -155,17 +187,10 @@ class RiskManager:
         cfg = self.cfg
         # Tiered drawdown circuit breaker — include open positions' unrealized PnL,
         # not just closed trades, so the breaker can fire before losses are realized.
-        now = datetime.now(timezone.utc)
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_start = now - timedelta(days=7)
-        day_realized = sum(t.pnl_pct for t in db.scalars(
-            select(Trade).where(Trade.status == TradeStatus.CLOSED, Trade.exit_time >= day_start)
-        ))
-        week_realized = sum(t.pnl_pct for t in db.scalars(
-            select(Trade).where(Trade.status == TradeStatus.CLOSED, Trade.exit_time >= week_start)
-        ))
-        day_loss = day_realized + day_unrealized_pct
-        week_loss = week_realized + day_unrealized_pct
+        from database import repository
+        dd = repository.realized_drawdown(db)
+        day_loss = dd["day_loss_pct"] + day_unrealized_pct
+        week_loss = dd["week_loss_pct"] + day_unrealized_pct
         action = circuit_breaker_action(
             day_loss, week_loss,
             day_soft=cfg.day_soft_loss_pct, day_hard=cfg.day_hard_loss_pct, week_hard=cfg.week_hard_loss_pct,

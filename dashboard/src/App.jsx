@@ -1,5 +1,6 @@
-import { BarChart3, HelpCircle, ListChecks, Radio, Settings as SettingsIcon } from "lucide-react";
+import { BarChart3, HelpCircle, Layers, ListChecks, Radio, Settings as SettingsIcon } from "lucide-react";
 import { useState } from "react";
+import AttributionTab from "./components/AttributionTab";
 import DecisionsTab from "./components/DecisionsTab";
 import Header from "./components/Header";
 import PerformanceTab from "./components/PerformanceTab";
@@ -13,6 +14,7 @@ const TABS = [
   { id: "decisions", label: "Why", icon: HelpCircle },
   { id: "trades", label: "Trades", icon: ListChecks },
   { id: "performance", label: "Performance", icon: BarChart3 },
+  { id: "attribution", label: "Attribution", icon: Layers },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
 
@@ -44,6 +46,7 @@ export default function App() {
         {tab === "decisions" && <DecisionsTab />}
         {tab === "trades" && <TradesTab />}
         {tab === "performance" && <PerformanceTab />}
+        {tab === "attribution" && <AttributionTab />}
         {tab === "settings" && <SettingsTab />}
       </main>
 

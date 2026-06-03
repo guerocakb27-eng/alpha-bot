@@ -21,9 +21,10 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 
-from config import settings
+from config import ANALYZE_CONCURRENCY, UNIVERSE_REFRESH_HOURS, UNIVERSE_SIZE, settings
 from core.bot_state import state as bot_state
 from core.decision_log import explain_decision, format_decision
+from core.universe import fetch_universe, refresh_due
 from core.execution_engine import ExecutionEngine
 from core.learning_engine import LearningEngine
 from core.notifications import notifications
@@ -114,7 +115,30 @@ class BotLoop:
             elapsed += IDLE_POLL_SECONDS
 
     # ─── Cycle ────────────────────────────────────────────────────────
+    async def _maybe_refresh_universe(self) -> None:
+        """Daily: rebuild watched_pairs as the top-N USDT pairs by 24h volume (behind a flag)."""
+        with SessionLocal() as db:
+            cfg = repository.get_settings(db)
+        n = int(cfg.get("universe_size", UNIVERSE_SIZE))
+        if not refresh_due(cfg.get("universe_updated_at"), UNIVERSE_REFRESH_HOURS, datetime.now(timezone.utc)):
+            return
+        try:
+            pairs = await asyncio.to_thread(fetch_universe, self.signal_engine.exchange, n)
+        except Exception as e:
+            logger.warning("auto-universe fetch failed, keeping current pairs: {}", e)
+            return
+        if not pairs:
+            return
+        with SessionLocal() as db:
+            repository.set_setting(db, "watched_pairs", pairs, "auto-universe")
+            repository.set_setting(db, "universe_updated_at", datetime.now(timezone.utc).isoformat(), "auto-universe")
+            repository.log_event(db, EventType.SETTINGS_CHANGE, f"Auto-universe: top {len(pairs)} pairs by 24h volume",
+                                 EventSeverity.INFO, event_metadata={"watched_pairs": pairs})
+        logger.info("Auto-universe refreshed: {} pairs", len(pairs))
+
     async def _cycle(self) -> None:
+        if settings.auto_universe_enabled:
+            await self._maybe_refresh_universe()
         with SessionLocal() as db:
             cfg = repository.get_settings(db)
         watched: list[str] = cfg.get("watched_pairs", ["BTC/USDT"])
@@ -123,15 +147,19 @@ class BotLoop:
 
         logger.debug("Cycle start: {} pairs, tf={}, min_score={}", len(watched), timeframe, min_score)
 
-        # 1. Analyze each watched pair
-        results = []
-        for symbol in watched:
-            try:
-                result = await self.signal_engine.analyze(symbol, timeframe)
-                results.append((symbol, result))
-            except Exception as e:
-                logger.warning("analyze({}) failed: {}", symbol, e)
-                continue
+        # 1. Analyze watched pairs concurrently (bounded), preserving order.
+        sem = asyncio.Semaphore(ANALYZE_CONCURRENCY)
+
+        async def _analyze_one(symbol: str):
+            async with sem:
+                try:
+                    return symbol, await self.signal_engine.analyze(symbol, timeframe)
+                except Exception as e:
+                    logger.warning("analyze({}) failed: {}", symbol, e)
+                    return None
+
+        gathered = await asyncio.gather(*[_analyze_one(s) for s in watched])
+        results = [r for r in gathered if r is not None]
 
         # (Dead-man's-switch heartbeat is NOT refreshed here: analyze() uses the PUBLIC
         # fetch_ohlcv, and public reachability must not keep the switch alive while

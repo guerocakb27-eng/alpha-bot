@@ -103,4 +103,6 @@ def test_format_skip_states_the_reason():
 
 # ─── default-off flag for verbose decision logging ───────────────────────
 def test_decision_logging_flag_defaults_off():
-    assert settings.decision_logging_enabled is False
+    # Code default, independent of any deployment .env (which may enable it).
+    from config import Settings
+    assert Settings(_env_file=None).decision_logging_enabled is False

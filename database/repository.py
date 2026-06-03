@@ -217,3 +217,18 @@ def recent_decisions(db: Session, limit: int = 50) -> list[dict[str, Any]]:
          "message": r.message, **(r.event_metadata or {})}
         for r in rows
     ]
+
+
+# ─── Risk ────────────────────────────────────────────────────────────
+def realized_drawdown(db: Session, now: datetime | None = None) -> dict[str, float]:
+    """Realized day/week PnL% (sum of closed-trade pnl_pct) — the circuit breaker's
+    closed-trade input and the risk gauge's data source. Losses are negative. Excludes
+    open-position unrealized PnL (needs live prices); the pre-trade check adds that on top."""
+    now = now or datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now - timedelta(days=7)
+    day = sum(t.pnl_pct for t in db.scalars(
+        select(Trade).where(Trade.status == TradeStatus.CLOSED, Trade.exit_time >= day_start)))
+    week = sum(t.pnl_pct for t in db.scalars(
+        select(Trade).where(Trade.status == TradeStatus.CLOSED, Trade.exit_time >= week_start)))
+    return {"day_loss_pct": float(day), "week_loss_pct": float(week)}

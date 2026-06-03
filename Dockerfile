@@ -23,11 +23,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-COPY config.py main.py ./
+COPY config.py main.py alembic.ini ./
 COPY core/ ./core/
 COPY indicators/ ./indicators/
 COPY backtesting/ ./backtesting/
+COPY strategies/ ./strategies/
 COPY database/ ./database/
+COPY alembic/ ./alembic/
 COPY api/ ./api/
 COPY scripts/ ./scripts/
 

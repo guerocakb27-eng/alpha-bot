@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 
-from api.routes import decisions, indicators, performance, risk, settings as settings_route, signals, status as status_route, trades, webhook
+from api.routes import decisions, indicators, performance, risk, settings as settings_route, signals, status as status_route, trades, webhook, whatif
 from api.websocket import manager as ws_manager, ws_endpoint
 from config import settings
 from core.bot_loop import BotLoop
@@ -112,6 +112,7 @@ app.include_router(settings_route.router)
 app.include_router(indicators.router)
 app.include_router(decisions.router)
 app.include_router(risk.router)
+app.include_router(whatif.router)
 app.include_router(webhook.router)
 
 

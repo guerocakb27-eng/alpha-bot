@@ -21,6 +21,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from config import INDICATOR_WEIGHTS_WITHIN_LAYER, PROJECT_ROOT, WEIGHTS_BY_REGIME, settings
+from core.anomaly import Anomaly, AnomalyConfig, winrate_collapse
 from core.drift import DriftConfig, detect_drift, rollback_target
 from core.significance import significant_direction
 from database.models import (
@@ -340,6 +341,34 @@ class LearningEngine:
                                live_wr, baseline_wr, report.severity, target)
         return {"drifted": report.drifted, "live_wr": live_wr, "severity": report.severity,
                 "reason": report.reason, "rollback_to": target}
+
+    def check_anomalies(self, recent_window: int = 20, baseline_window: int = 100,
+                        cfg: AnomalyConfig | None = None) -> list[dict[str, Any]]:
+        """Detect + persist operational anomalies as ANOMALY events for the alerts banner.
+        Currently win-rate collapse (recent WR far below the longer-run baseline). No-op
+        unless settings.anomaly_alerts_enabled. Pure detection in core.anomaly; this is the
+        DB shell + event dispatch (slippage/rejection detectors exist but await live wiring)."""
+        if not settings.anomaly_alerts_enabled:
+            return []
+        cfg = cfg or AnomalyConfig()
+        found: list[Anomaly] = []
+        with SessionLocal() as db:
+            baseline = list(db.scalars(
+                select(Trade).where(Trade.status == TradeStatus.CLOSED)
+                .order_by(desc(Trade.exit_time)).limit(baseline_window)
+            ))
+            if baseline:
+                baseline_wr = sum(1 for t in baseline if t.pnl_usdt > 0) / len(baseline)
+                recent = baseline[:recent_window]
+                live_wr = sum(1 for t in recent if t.pnl_usdt > 0) / len(recent)
+                hit = winrate_collapse(live_wr, baseline_wr, len(recent), cfg=cfg)
+                if hit:
+                    found.append(hit)
+            for a in found:
+                logger.warning("Anomaly [{}]: {}", a.kind, a.message)
+                log_event(db, EventType.ANOMALY, a.message, EventSeverity.WARNING,
+                          event_metadata={"kind": a.kind, "magnitude": round(a.severity, 4)})
+        return [{"kind": a.kind, "severity": a.severity, "message": a.message} for a in found]
 
     # ─── L6 Weekly report ───────────────────────────────────────────
     def generate_weekly_report(self) -> Path:

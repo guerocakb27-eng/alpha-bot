@@ -26,7 +26,7 @@ def test_db(monkeypatch):
 
     # Rebind the canonical SessionLocal AND every by-name import of it.
     monkeypatch.setattr(models, "SessionLocal", TestSession)
-    for mod in ("core.execution_engine", "core.sentiment_engine"):
+    for mod in ("core.execution_engine", "core.sentiment_engine", "core.learning_engine"):
         import importlib
         m = importlib.import_module(mod)
         if hasattr(m, "SessionLocal"):

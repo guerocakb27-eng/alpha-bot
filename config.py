@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     # Phase E1: log a per-signal WHY chain (verdict + gating reason + top drivers) for
     # every trade/skip decision, for the dashboard's "why did the bot do this" panel. Off.
     decision_logging_enabled: bool = False
+    # Phase E4: detect + persist anomalies (win-rate collapse, repeated rejections,
+    # slippage spikes) as ANOMALY events for the dashboard alerts banner. Default off.
+    anomaly_alerts_enabled: bool = False
 
 
 settings = Settings()

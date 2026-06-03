@@ -87,6 +87,22 @@ def aggregate_layers(
     return int(round(max(-100, min(100, base))))
 
 
+def whatif_score(
+    layer_scores: dict[str, float],
+    weights: dict[str, float],
+    *,
+    mode: str = "weighted",
+    min_score: int = MIN_SIGNAL_SCORE,
+) -> dict:
+    """Re-score precomputed layer scores under candidate regime weights — the dashboard
+    what-if simulator. Reuses aggregate_layers so it tracks the DEFAULT live scoring path
+    exactly; the optional Phase C edge toggles (MTF/divergence/sentiment/ensemble) are not
+    applied. Pure — no DB, no network."""
+    final = aggregate_layers(layer_scores, weights, mode)
+    signal = "BUY" if final >= min_score else "SELL" if final <= -min_score else "NEUTRAL"
+    return {"final_score": final, "signal": signal}
+
+
 def _confirm_mtf(df: pd.DataFrame, base_tf: str, base_final: int, min_score: int) -> int:
     """Resample to higher TFs, score each, and combine via cross-TF consensus (Phase C2)."""
     highs = higher_timeframes(base_tf)

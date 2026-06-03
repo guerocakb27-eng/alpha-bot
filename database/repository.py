@@ -219,6 +219,22 @@ def recent_decisions(db: Session, limit: int = 50) -> list[dict[str, Any]]:
     ]
 
 
+def recent_anomalies(db: Session, limit: int = 50) -> list[dict[str, Any]]:
+    """Most-recent ANOMALY events, newest first, flattened for the alerts banner."""
+    rows = db.scalars(
+        select(BotEvent)
+        .where(BotEvent.event_type == EventType.ANOMALY)
+        .order_by(desc(BotEvent.timestamp))
+        .limit(limit)
+    ).all()
+    return [
+        {"id": r.id, "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+         "severity": r.severity.value if hasattr(r.severity, "value") else r.severity,
+         "message": r.message, **(r.event_metadata or {})}
+        for r in rows
+    ]
+
+
 # ─── Risk ────────────────────────────────────────────────────────────
 def realized_drawdown(db: Session, now: datetime | None = None) -> dict[str, float]:
     """Realized day/week PnL% (sum of closed-trade pnl_pct) — the circuit breaker's

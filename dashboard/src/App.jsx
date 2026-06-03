@@ -1,8 +1,11 @@
-import { BarChart3, Grid3x3, HelpCircle, Layers, ListChecks, Radio, Settings as SettingsIcon } from "lucide-react";
+import { BarChart3, FlaskConical, Grid3x3, HelpCircle, Layers, LineChart, ListChecks, Radio, Settings as SettingsIcon } from "lucide-react";
 import { useState } from "react";
+import AlertsBanner from "./components/AlertsBanner";
 import AttributionTab from "./components/AttributionTab";
+import BacktestTab from "./components/BacktestTab";
 import DecisionsTab from "./components/DecisionsTab";
 import HeatmapTab from "./components/HeatmapTab";
+import WhatIfTab from "./components/WhatIfTab";
 import Header from "./components/Header";
 import PerformanceTab from "./components/PerformanceTab";
 import SettingsTab from "./components/SettingsTab";
@@ -17,6 +20,8 @@ const TABS = [
   { id: "trades", label: "Trades", icon: ListChecks },
   { id: "performance", label: "Performance", icon: BarChart3 },
   { id: "attribution", label: "Attribution", icon: Layers },
+  { id: "whatif", label: "What-If", icon: FlaskConical },
+  { id: "backtest", label: "Backtest", icon: LineChart },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
 
@@ -27,6 +32,7 @@ export default function App() {
   return (
     <div className="min-h-screen flex flex-col">
       <Header wsStatus={wsStatus} />
+      <AlertsBanner />
 
       <nav className="border-b border-border bg-bg/50 px-4 flex items-center gap-1 overflow-x-auto">
         {TABS.map(({ id, label, icon: Icon }) => {
@@ -50,6 +56,8 @@ export default function App() {
         {tab === "trades" && <TradesTab />}
         {tab === "performance" && <PerformanceTab />}
         {tab === "attribution" && <AttributionTab />}
+        {tab === "whatif" && <WhatIfTab />}
+        {tab === "backtest" && <BacktestTab />}
         {tab === "settings" && <SettingsTab />}
       </main>
 

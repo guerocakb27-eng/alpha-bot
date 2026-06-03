@@ -64,6 +64,7 @@ class EventType(str, enum.Enum):
     WEIGHTS_UPDATE = "WEIGHTS_UPDATE"
     SETTINGS_CHANGE = "SETTINGS_CHANGE"
     DECISION = "DECISION"
+    ANOMALY = "ANOMALY"
 
 
 class EventSeverity(str, enum.Enum):

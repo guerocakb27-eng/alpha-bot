@@ -244,6 +244,13 @@ class BotLoop:
                 "exit_price": trade.exit_price, "reason": "tp_hit" if trade.tp_hit else "sl_hit" if trade.sl_hit else "auto",
             })
 
+        # 5b. Anomaly scan (E4) — win rate only changes when a trade closes; no-op unless enabled.
+        if closed:
+            try:
+                self.learning_engine.check_anomalies()
+            except Exception as e:
+                logger.warning("anomaly scan failed: {}", e)
+
         # 6. Balance broadcast
         try:
             balance = self.execution_engine.balance()

@@ -93,6 +93,8 @@ class Settings(BaseSettings):
     # Phase E4: detect + persist anomalies (win-rate collapse, repeated rejections,
     # slippage spikes) as ANOMALY events for the dashboard alerts banner. Default off.
     anomaly_alerts_enabled: bool = False
+    # Phase F: auto-maintain watched_pairs as the top-N USDT pairs by 24h volume. Off.
+    auto_universe_enabled: bool = False
 
 
 settings = Settings()
@@ -101,6 +103,11 @@ settings = Settings()
 # ─── Signal Engine Thresholds ─────────────────────────────────────────
 MIN_SIGNAL_SCORE: int = 65
 MIN_CONFIDENCE: int = 60
+
+# ─── Phase F: auto trading universe ───────────────────────────────────
+UNIVERSE_SIZE: int = 20
+UNIVERSE_REFRESH_HOURS: float = 24.0
+ANALYZE_CONCURRENCY: int = 8
 
 
 # ─── Regime → Layer Weights (sum to 1.0 per regime) ───────────────────

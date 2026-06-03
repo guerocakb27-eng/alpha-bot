@@ -77,10 +77,13 @@ def test_rollback_none_when_only_current():
 
 # ─── default-off flag is respected by callers ────────────────────────────
 def test_drift_detection_flag_defaults_off():
-    assert settings.drift_detection_enabled is False
+    # Code default, independent of any deployment .env (which may enable it).
+    from config import Settings
+    assert Settings(_env_file=None).drift_detection_enabled is False
 
 
-def test_check_drift_is_noop_when_flag_off():
+def test_check_drift_is_noop_when_flag_off(monkeypatch):
     # Flag off must short-circuit BEFORE any DB access (returns None, no SessionLocal use).
+    monkeypatch.setattr(settings, "drift_detection_enabled", False)
     from core.learning_engine import LearningEngine
     assert LearningEngine().check_drift(baseline_wr=0.55) is None

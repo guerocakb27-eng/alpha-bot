@@ -1,6 +1,7 @@
-import { BarChart3, FlaskConical, Grid3x3, HelpCircle, Layers, ListChecks, Radio, Settings as SettingsIcon } from "lucide-react";
+import { BarChart3, FlaskConical, Grid3x3, HelpCircle, Layers, LineChart, ListChecks, Radio, Settings as SettingsIcon } from "lucide-react";
 import { useState } from "react";
 import AttributionTab from "./components/AttributionTab";
+import BacktestTab from "./components/BacktestTab";
 import DecisionsTab from "./components/DecisionsTab";
 import HeatmapTab from "./components/HeatmapTab";
 import WhatIfTab from "./components/WhatIfTab";
@@ -19,6 +20,7 @@ const TABS = [
   { id: "performance", label: "Performance", icon: BarChart3 },
   { id: "attribution", label: "Attribution", icon: Layers },
   { id: "whatif", label: "What-If", icon: FlaskConical },
+  { id: "backtest", label: "Backtest", icon: LineChart },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
 
@@ -53,6 +55,7 @@ export default function App() {
         {tab === "performance" && <PerformanceTab />}
         {tab === "attribution" && <AttributionTab />}
         {tab === "whatif" && <WhatIfTab />}
+        {tab === "backtest" && <BacktestTab />}
         {tab === "settings" && <SettingsTab />}
       </main>
 

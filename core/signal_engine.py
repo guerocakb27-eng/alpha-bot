@@ -356,16 +356,37 @@ def score_signal(
 class SignalEngine:
     """Computes a final signal for a symbol/timeframe."""
 
+    _VALID_MODES = ("off", "shadow", "live")
+
     def __init__(
         self,
         exchange,
         regime_detector: MarketRegimeDetector | None = None,
         sentiment_engine: SentimentEngine | None = None,
-        enable_sentiment: bool = True,
+        sentiment_mode: str | None = None,
+        enable_sentiment: bool | None = None,
     ) -> None:
         self.exchange = exchange
         self.regime_detector = regime_detector or MarketRegimeDetector()
-        self.sentiment_engine = sentiment_engine or (SentimentEngine() if enable_sentiment else None)
+        # Resolution: explicit sentiment_mode wins; else legacy enable_sentiment; else "live".
+        if sentiment_mode is None:
+            sentiment_mode = "live" if enable_sentiment in (None, True) else "off"
+        if sentiment_mode not in self._VALID_MODES:
+            raise ValueError(f"sentiment_mode must be one of {self._VALID_MODES}, got {sentiment_mode!r}")
+        self.sentiment_mode = sentiment_mode
+        self.sentiment_engine = sentiment_engine or (
+            SentimentEngine() if sentiment_mode != "off" else None
+        )
+
+    def set_sentiment_mode(self, mode: str) -> None:
+        """Runtime toggle (kill-switch). 'off' drops the engine; 'shadow'/'live' (re)creates it."""
+        if mode not in self._VALID_MODES:
+            raise ValueError(f"sentiment_mode must be one of {self._VALID_MODES}, got {mode!r}")
+        self.sentiment_mode = mode
+        if mode == "off":
+            self.sentiment_engine = None
+        elif self.sentiment_engine is None:
+            self.sentiment_engine = SentimentEngine()
 
     async def analyze(self, symbol: str, timeframe: str, limit: int = 500) -> SignalResult:
         # Fetch OHLCV + sentiment in parallel
@@ -391,4 +412,7 @@ class SignalEngine:
         logger.debug("Detected regime for {} {}: {}", symbol, timeframe, regime.value)
 
         # Single shared scoring path — identical to the backtester's.
-        return score_signal(df, regime, symbol=symbol, timeframe=timeframe, sentiment=sentiment)
+        return score_signal(
+            df, regime, symbol=symbol, timeframe=timeframe,
+            sentiment=sentiment, sentiment_mode=self.sentiment_mode,
+        )

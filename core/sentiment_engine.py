@@ -26,9 +26,31 @@ class SentimentScore:
     symbol: str
     composite_score: float                       # -100..+100
     component_scores: dict[str, float]           # per-source raw scores
-    data_freshness_seconds: int
+    fetch_latency_seconds: int                   # wall-clock seconds spent fetching
     timestamp: datetime
+    active_sources: int = 0                       # how many sources returned a value
+    coverage: float = 0.0                         # sum of SOURCE_WEIGHTS for active sources
+    data_age_seconds: int = 0                     # age of this reading (~ fetch latency)
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+def sentiment_gate(
+    score: SentimentScore,
+    *,
+    min_sources: int = 2,
+    min_coverage: float = 0.40,
+    max_age_s: int = 1800,
+) -> bool:
+    """True if the sentiment reading is trustworthy enough to move the live score.
+
+    Guards against single-source domination (e.g. only Fear & Greed active) and stale
+    readings. Pure: reads only the score's own fields.
+    """
+    return (
+        score.active_sources >= min_sources
+        and score.coverage >= min_coverage
+        and score.data_age_seconds <= max_age_s
+    )
 
 
 # ─── Source weights (sum to 1.0 across active sources; renormalized at runtime) ──
@@ -305,12 +327,16 @@ class SentimentEngine:
         )
         composite = max(-100.0, min(100.0, composite))
 
+        latency = int(time.monotonic() - started)
         score = SentimentScore(
             symbol=symbol,
             composite_score=round(composite, 2),
             component_scores={k: round(v, 2) for k, v in component_scores.items()},
-            data_freshness_seconds=int(time.monotonic() - started),
+            fetch_latency_seconds=latency,
             timestamp=datetime.now(timezone.utc),
+            active_sources=len(component_scores),
+            coverage=round(total_w, 4),           # reuse the renormalization denominator
+            data_age_seconds=latency,             # fetched fresh each cycle; per-source cache-age is a future refinement
             raw=raw,
         )
 

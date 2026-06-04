@@ -145,6 +145,11 @@ class BotLoop:
         timeframe: str = cfg.get("primary_timeframe", "1h")
         min_score: int = int(cfg.get("min_signal_score", 65))
 
+        runtime_mode = cfg.get("sentiment_mode")
+        if runtime_mode in ("off", "shadow", "live") and runtime_mode != self.signal_engine.sentiment_mode:
+            self.signal_engine.set_sentiment_mode(runtime_mode)
+            logger.info("Sentiment mode set to {} via runtime settings", runtime_mode)
+
         logger.debug("Cycle start: {} pairs, tf={}, min_score={}", len(watched), timeframe, min_score)
 
         # 1. Analyze watched pairs concurrently (bounded), preserving order.
@@ -182,7 +187,7 @@ class BotLoop:
                     volume_score=result.layers.get("volume", 0),
                     pattern_score=result.layers.get("pattern", 0),
                     sentiment_score=result.layers.get("sentiment", 0),
-                    indicators_detail=result.indicators_detail,
+                    indicators_detail={**result.indicators_detail, "_sentiment": result.extras.get("sentiment")},
                 )
             await self._broadcast("new_signal", {
                 "symbol": symbol, "final_score": row.final_score, "signal": row.signal,

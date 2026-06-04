@@ -26,7 +26,7 @@ from core.divergence import detect_divergence
 from core.market_regime import MarketRegimeDetector, Regime
 from core.quality_filters import market_structure, signal_freshness, volume_confirmation
 from core.multi_timeframe import TF_RULE, higher_timeframes, mtf_consensus, resample_ohlcv
-from core.sentiment_engine import SentimentEngine, SentimentScore
+from core.sentiment_engine import SentimentEngine, SentimentScore, sentiment_gate
 from indicators import momentum, patterns, trend, volatility, volume
 from strategies import default_ensemble
 
@@ -148,6 +148,7 @@ def score_signal(
     min_score: int = MIN_SIGNAL_SCORE,
     sentiment: SentimentScore | None = None,
     mtf: bool | None = None,
+    sentiment_mode: str = "live",
 ) -> SignalResult:
     """Score a prepared OHLCV frame into a regime-weighted SignalResult.
 
@@ -264,9 +265,23 @@ def score_signal(
         layer_scores[layer_name] = int(round(total))
     layer_scores["sentiment"] = int(round(sentiment.composite_score)) if sentiment else 0
 
+    # Sentiment contributes to the SCORE only in live mode and only when the data-quality
+    # gate passes. In shadow/off the composite stays in layer_scores for display, but the
+    # aggregation sees 0 — byte-identical to the legacy sentiment=None path (both modes).
+    sent_in_score = (
+        sentiment_mode == "live"
+        and sentiment is not None
+        and sentiment_gate(
+            sentiment,
+            min_sources=settings.sentiment_min_sources,
+            min_coverage=settings.sentiment_min_coverage,
+            max_age_s=settings.sentiment_max_age_s,
+        )
+    )
     # ─── Regime-weighted final score (aggregation + MTF are runtime toggles) ──
     regime_weights = WEIGHTS_BY_REGIME[regime.value]
-    final_score = aggregate_layers(layer_scores, regime_weights, settings.aggregation_mode)
+    agg_layers = layer_scores if sent_in_score else {**layer_scores, "sentiment": 0}
+    final_score = aggregate_layers(agg_layers, regime_weights, settings.aggregation_mode)
     if (settings.mtf_enabled if mtf is None else mtf):
         final_score = _confirm_mtf(df, timeframe, final_score, min_score)
     if settings.divergence_enabled:
@@ -325,10 +340,14 @@ def score_signal(
             "candle_patterns": candle_patterns,
             "chart_patterns": chart,
             "sentiment": {
-                "composite": sentiment.composite_score if sentiment else None,
-                "components": sentiment.component_scores if sentiment else {},
-                "freshness_s": sentiment.data_freshness_seconds if sentiment else None,
-            } if sentiment else None,
+                "mode": sentiment_mode,
+                "in_score": sent_in_score,
+                "composite": sentiment.composite_score,
+                "components": sentiment.component_scores,
+                "active_sources": sentiment.active_sources,
+                "coverage": sentiment.coverage,
+                "latency_s": sentiment.fetch_latency_seconds,
+            } if sentiment else {"mode": sentiment_mode, "in_score": False, "composite": None},
             **quality,
         },
     )
@@ -337,16 +356,37 @@ def score_signal(
 class SignalEngine:
     """Computes a final signal for a symbol/timeframe."""
 
+    _VALID_MODES = ("off", "shadow", "live")
+
     def __init__(
         self,
         exchange,
         regime_detector: MarketRegimeDetector | None = None,
         sentiment_engine: SentimentEngine | None = None,
-        enable_sentiment: bool = True,
+        sentiment_mode: str | None = None,
+        enable_sentiment: bool | None = None,
     ) -> None:
         self.exchange = exchange
         self.regime_detector = regime_detector or MarketRegimeDetector()
-        self.sentiment_engine = sentiment_engine or (SentimentEngine() if enable_sentiment else None)
+        # Resolution: explicit sentiment_mode wins; else legacy enable_sentiment; else "live".
+        if sentiment_mode is None:
+            sentiment_mode = "live" if enable_sentiment in (None, True) else "off"
+        if sentiment_mode not in self._VALID_MODES:
+            raise ValueError(f"sentiment_mode must be one of {self._VALID_MODES}, got {sentiment_mode!r}")
+        self.sentiment_mode = sentiment_mode
+        self.sentiment_engine = sentiment_engine or (
+            SentimentEngine() if sentiment_mode != "off" else None
+        )
+
+    def set_sentiment_mode(self, mode: str) -> None:
+        """Runtime toggle (kill-switch). 'off' drops the engine; 'shadow'/'live' (re)creates it."""
+        if mode not in self._VALID_MODES:
+            raise ValueError(f"sentiment_mode must be one of {self._VALID_MODES}, got {mode!r}")
+        self.sentiment_mode = mode
+        if mode == "off":
+            self.sentiment_engine = None
+        elif self.sentiment_engine is None:
+            self.sentiment_engine = SentimentEngine()
 
     async def analyze(self, symbol: str, timeframe: str, limit: int = 500) -> SignalResult:
         # Fetch OHLCV + sentiment in parallel
@@ -372,4 +412,7 @@ class SignalEngine:
         logger.debug("Detected regime for {} {}: {}", symbol, timeframe, regime.value)
 
         # Single shared scoring path — identical to the backtester's.
-        return score_signal(df, regime, symbol=symbol, timeframe=timeframe, sentiment=sentiment)
+        return score_signal(
+            df, regime, symbol=symbol, timeframe=timeframe,
+            sentiment=sentiment, sentiment_mode=self.sentiment_mode,
+        )

@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     anomaly_alerts_enabled: bool = False
     # Phase F: auto-maintain watched_pairs as the top-N USDT pairs by 24h volume. Off.
     auto_universe_enabled: bool = False
+    # Sentiment layer mode: "off" (no fetch), "shadow" (computed + persisted but NOT in
+    # final_score — default, safe), or "live" (contributes when the data-quality gate passes).
+    sentiment_mode: str = "shadow"
+    # Sentiment data-quality gate (enforced only in live; logged in shadow):
+    sentiment_min_sources: int = 2
+    sentiment_min_coverage: float = 0.40
+    sentiment_max_age_s: int = 1800
 
 
 settings = Settings()

@@ -31,7 +31,7 @@ async def main() -> None:
     print(f"Symbol:       {C.C}{sentiment.symbol}{C.END}")
     col = color_for_score(int(sentiment.composite_score))
     print(f"Composite:    {col}{C.BOLD}{sentiment.composite_score:+.1f}{C.END}")
-    print(f"Freshness:    {sentiment.data_freshness_seconds}s")
+    print(f"Fetch latency:{sentiment.fetch_latency_seconds}s  (sources={sentiment.active_sources}, coverage={sentiment.coverage})")
     print(f"\n{C.BOLD}Components:{C.END}")
     for name, score in sentiment.component_scores.items():
         c = color_for_score(int(score))

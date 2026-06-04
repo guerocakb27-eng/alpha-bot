@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     if settings.binance_testnet:
         exchange.set_sandbox_mode(True)
     app.state.exchange = exchange
-    app.state.signal_engine = SignalEngine(exchange)
+    app.state.signal_engine = SignalEngine(exchange, sentiment_mode=settings.sentiment_mode)
     app.state.risk_manager = RiskManager()
     app.state.execution_engine = ExecutionEngine(exchange, risk=app.state.risk_manager)
     app.state.learning_engine = LearningEngine()

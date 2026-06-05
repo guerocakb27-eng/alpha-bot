@@ -187,7 +187,7 @@ class BotLoop:
                     volume_score=result.layers.get("volume", 0),
                     pattern_score=result.layers.get("pattern", 0),
                     sentiment_score=result.layers.get("sentiment", 0),
-                    indicators_detail={**result.indicators_detail, "_sentiment": result.extras.get("sentiment")},
+                    indicators_detail=result.indicators_detail,
                 )
             await self._broadcast("new_signal", {
                 "symbol": symbol, "final_score": row.final_score, "signal": row.signal,

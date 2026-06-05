@@ -21,7 +21,10 @@ def build_indicator_heatmap(signals: list[Any]) -> dict:
     seen: set[str] = set()
     rows: list[dict] = []
     for s in signals:
-        detail = getattr(s, "indicators_detail", None) or {}
+        raw = getattr(s, "indicators_detail", None) or {}
+        # Surface only numeric indicator scores; skip any nested meta (e.g. a persisted
+        # `_sentiment` block) that would render as an object cell and crash the frontend.
+        detail = {k: v for k, v in raw.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
         for k in detail:
             if k not in seen:
                 seen.add(k)

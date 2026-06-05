@@ -149,6 +149,7 @@ def score_signal(
     sentiment: SentimentScore | None = None,
     mtf: bool | None = None,
     sentiment_mode: str = "live",
+    sentiment_gate_enabled: bool = True,
 ) -> SignalResult:
     """Score a prepared OHLCV frame into a regime-weighted SignalResult.
 
@@ -271,12 +272,12 @@ def score_signal(
     sent_in_score = (
         sentiment_mode == "live"
         and sentiment is not None
-        and sentiment_gate(
+        and (not sentiment_gate_enabled or sentiment_gate(
             sentiment,
             min_sources=settings.sentiment_min_sources,
             min_coverage=settings.sentiment_min_coverage,
             max_age_s=settings.sentiment_max_age_s,
-        )
+        ))
     )
     # ─── Regime-weighted final score (aggregation + MTF are runtime toggles) ──
     regime_weights = WEIGHTS_BY_REGIME[regime.value]

@@ -70,3 +70,16 @@ def test_extras_report_mode_and_gate():
     res = score_signal(df, regime, symbol="X", timeframe="1h", sentiment=sent, sentiment_mode="shadow")
     s = res.extras["sentiment"]
     assert s["mode"] == "shadow" and s["in_score"] is False and s["active_sources"] == 3
+
+
+def test_gate_bypass_folds_single_source_sentiment():
+    df = _df().iloc[:290]
+    regime = _regime(df)
+    # single-source reading (F&G only): coverage 0.25, 1 source -> normally gated OUT
+    sent = _sent(80, active_sources=1, coverage=0.25)
+    base = score_signal(df, regime, symbol="X", timeframe="1h", sentiment=None)
+    gated = score_signal(df, regime, symbol="X", timeframe="1h", sentiment=sent, sentiment_mode="live")
+    ungated = score_signal(df, regime, symbol="X", timeframe="1h", sentiment=sent,
+                           sentiment_mode="live", sentiment_gate_enabled=False)
+    assert gated.final_score == base.final_score          # gate blocks single source
+    assert ungated.final_score != base.final_score        # bypass folds it in

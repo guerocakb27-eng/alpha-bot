@@ -57,3 +57,14 @@ def test_sparse_indicators_per_symbol():
 def test_empty_input():
     out = build_indicator_heatmap([])
     assert out == {"symbols": [], "indicators": [], "rows": []}
+
+
+def test_nonint_meta_keys_excluded():
+    # indicators_detail may carry nested meta (e.g. a persisted `_sentiment` block).
+    # The heatmap must surface ONLY numeric indicator scores — never an object, which
+    # would crash the frontend (it renders each value directly as a React child).
+    out = build_indicator_heatmap([
+        _sig("BTC/USDT", {"rsi_14": 40, "_sentiment": {"mode": "shadow", "composite": 14.0}}),
+    ])
+    assert out["indicators"] == ["rsi_14"]
+    assert out["rows"][0]["indicators"] == {"rsi_14": 40}
